@@ -68,8 +68,9 @@ Apps Script エディタの「プロジェクトの設定（歯車）→ スク�
 | `CLIENT_ID` | ○ | 次の手順 3 で作る OAuth クライアント ID（`…apps.googleusercontent.com`） |
 | `ALLOWED_DOMAIN` | | 送信を許可する Google Workspace のドメイン（例：`origami-vol.or.jp`）。`setup()` が自分のアドレスのドメインで作る |
 | `ALLOWED_EMAILS` | | ドメインに関係なく送信を許可するアドレス（カンマ区切り）。組織外の人に試してもらうときに使う |
+| `ADMIN_EMAILS` | | 撮影ページで「管理者向け」の欄（送信先の設定・接続テスト・参加用 QR）を見られるアドレス（カンマ区切り）。`setup()` が自分のアドレスで作る。ほかの人には欄そのものが表示されない |
 
-`FOLDER_ID`、`SHEET_ID`、`ALLOWED_DOMAIN` は手順 4 の `setup()` が作るので、自分で入れる必要はありません。`ALLOWED_DOMAIN` と `ALLOWED_EMAILS` のどちらも無いときは、だれの送信も受け付けません。
+`FOLDER_ID`、`SHEET_ID`、`ALLOWED_DOMAIN`、`ADMIN_EMAILS` は手順 4 の `setup()` が作るので、自分で入れる必要はありません。`ALLOWED_DOMAIN` と `ALLOWED_EMAILS` のどちらも無いときは、だれの送信も受け付けません。
 
 ### 3. ログイン用の OAuth クライアント ID を作る
 

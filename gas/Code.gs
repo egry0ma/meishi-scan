@@ -37,6 +37,8 @@
  *   ALLOWED_DOMAIN       送信を許可する Google Workspace のドメイン（例：origami-vol.or.jp）。
  *                        setup() が、実行した人のアドレスのドメインで作る（gmail.com の場合は作らない）
  *   ALLOWED_EMAILS       任意。ドメインに関係なく許可するアドレス（カンマ区切り）
+ *   ADMIN_EMAILS         撮影ページで「管理者向け」の欄（送信先の設定・参加用 QR）を見られるアドレス
+ *                        （カンマ区切り）。setup() が、実行した人のアドレスで作る
  *   FOLDER_ID / SHEET_ID setup() が作成する
  *   ※ ALLOWED_DOMAIN と ALLOWED_EMAILS のどちらも無いときは、だれの送信も受け付けない
  */
@@ -116,8 +118,9 @@ const MeishiScan = (function () {
       props.setProperty('PROVIDER', 'claude');
     }
     // 送信を許可するドメイン：実行した人（＝管理者）のアドレスのドメイン
+    const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+    if (!props.getProperty('ADMIN_EMAILS') && me) props.setProperty('ADMIN_EMAILS', me);
     if (!props.getProperty('ALLOWED_DOMAIN') && !props.getProperty('ALLOWED_EMAILS')) {
-      const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
       const domain = me.split('@')[1] || '';
       if (domain && domain !== 'gmail.com' && domain !== 'googlemail.com') {
         props.setProperty('ALLOWED_DOMAIN', domain);
@@ -129,6 +132,7 @@ const MeishiScan = (function () {
     Logger.log('セットアップ完了（書き込み先：' + targetSheetName_() + '）');
     Logger.log('送信を許可：' + (props.getProperty('ALLOWED_DOMAIN') ? 'ドメイン ' + props.getProperty('ALLOWED_DOMAIN') : '') +
       (props.getProperty('ALLOWED_EMAILS') ? ' アドレス ' + props.getProperty('ALLOWED_EMAILS') : ''));
+    Logger.log('管理者：' + (props.getProperty('ADMIN_EMAILS') || '（なし）'));
     if (!props.getProperty('CLIENT_ID')) {
       Logger.log('スクリプトプロパティ CLIENT_ID に、Google Cloud で作った OAuth クライアント ID を設定してください。');
     }
@@ -156,7 +160,8 @@ const MeishiScan = (function () {
       const user = auth.user;
 
       // 接続テスト（ログインの確認だけ。LLMは呼ばない）
-      if (req.action === 'ping') return json_({ ok: true, pong: true, name: user.name });
+      // admin は撮影ページで「管理者向け」の欄を出すかどうかにだけ使う（データは返さない）
+      if (req.action === 'ping') return json_({ ok: true, pong: true, name: user.name, admin: isAdmin_(user.email, props) });
 
       const cardId = String(req.cardId || '');
       if (!/^[A-Za-z0-9-]{8,64}$/.test(cardId)) {
@@ -270,6 +275,11 @@ const MeishiScan = (function () {
     if (!domainOk && allowedEmails.indexOf(email) < 0) return { ok: false, error: 'not_allowed' };
     if (!hit) cache.put(key, JSON.stringify(info), Math.max(1, Math.min(3000, Math.floor(Number(info.exp) - now))));
     return { ok: true, user: { email: email, name: String(info.name || email) } };
+  }
+
+  function isAdmin_(email, props) {
+    return String(props.getProperty('ADMIN_EMAILS') || '').toLowerCase().split(',')
+      .map(function (x) { return x.trim(); }).indexOf(String(email).toLowerCase()) >= 0;
   }
 
   function parseDate_(s) {

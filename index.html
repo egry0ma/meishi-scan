@@ -1250,6 +1250,7 @@ $('#dlg-settings').addEventListener('close', () => {
     saveSettings(readSettingsForm());
     toast('保存しました');
     if (settings.clientId !== before) initLogin();
+    checkRole();
   }
 });
 $('#btn-ping').addEventListener('click', async () => {
@@ -1334,7 +1335,27 @@ function currentAuth() {
 }
 function clearAuth() {
   try { sessionStorage.removeItem(AUTH_KEY); } catch { /* noop */ }
+  role = { checked: false, admin: false };
   renderLogin();
+}
+
+// 「管理者向け」の欄を出すかどうか。ログイン後に GAS に問い合わせて決める（管理者は GAS の ADMIN_EMAILS）
+let role = { checked: false, admin: false };
+async function checkRole() {
+  const a = currentAuth();
+  if (!a || !GAS_URL_RE.test(settings.gasUrl)) return;
+  try {
+    const data = await postToGas({ action: 'ping', idToken: a.credential });
+    // 古い版の GAS は admin を返さない。そのときは確かめられなかったものとして欄を出したままにする
+    if (data.ok) role = { checked: 'admin' in data, admin: !!data.admin };
+    else if (data.error === 'login_required') clearAuth();
+  } catch { /* 問い合わせられないときは、直せるよう欄を出したままにする */ }
+  renderLogin();
+}
+/** 送信先が未設定、または GAS で管理者か確かめられていないときは出す。参加者と確かめられたら出さない */
+function showAdmin() {
+  const configured = GAS_URL_RE.test(settings.gasUrl) && CLIENT_ID_RE.test(settings.clientId);
+  return !configured || !role.checked || role.admin;
 }
 function onCredential(resp) {
   try {
@@ -1342,6 +1363,7 @@ function onCredential(resp) {
     const a = { credential: resp.credential, name: p.name || p.email, email: p.email, exp: p.exp };
     sessionStorage.setItem(AUTH_KEY, JSON.stringify(a));
     toast(`${a.name} でログインしました`);
+    checkRole();
   } catch (e) {
     console.error(e);
     toast('ログインできませんでした: ' + e.message, 5000);
@@ -1404,6 +1426,7 @@ function renderLogin() {
     ? `${a.name}（${a.email}）でログイン中`
     : configured ? 'ログインしていません' : '送信先が未設定です。管理者から参加用の QR をもらって読み取ってください';
   $('#btn-logout').hidden = !a;
+  $('#admin').hidden = !showAdmin();
   const box = $('#login-button');
   box.hidden = !!a || !configured;
   if (!a && configured && gisReadyFor === settings.clientId && window.google?.accounts?.id && $('#dlg-settings').open) {
@@ -1509,6 +1532,7 @@ $('#dlg-share').addEventListener('close', () => {
 window.addEventListener('hashchange', applySetupLink);
 applySetupLink();
 initLogin();
+if (currentAuth()) checkRole(); // 再読み込みでログインが残っているとき
 
 // ===== 起動 =====
 (async () => {
