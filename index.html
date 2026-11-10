@@ -104,6 +104,9 @@
     <label for="in-token">トークン（setup() で作られた TOKEN）</label>
     <input id="in-token" type="password" autocomplete="off" spellcheck="false">
     <p class="hint">URL とトークンはこの端末のブラウザ（localStorage）にだけ保存されます。</p>
+    <label for="in-receiver">受領者氏名（「連絡先受領者氏名」列に入ります）</label>
+    <input id="in-receiver" type="text" autocomplete="name" placeholder="例：山田 太郎">
+    <p class="hint">送信するすべての名刺に入ります。他の人が受け取った名刺を送るときは、送信前に変更してください。</p>
     <label for="in-sharp">ピントのしきい値（撮影中の画面下のバーに現在値が出ます）</label>
     <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
     <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
@@ -164,7 +167,7 @@ const state = {
 };
 
 // ===== 設定 =====
-const DEFAULT_SETTINGS = { gasUrl: '', token: '', sharp: 60, auto: true };
+const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', sharp: 60, auto: true };
 function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_SETTINGS }; }
@@ -623,6 +626,7 @@ const ERROR_TEXT = {
   processing: '別の送信が処理中です（後で再送してください）',
   bad_image: '画像が大きすぎるか壊れています',
   bad_card_id: 'カードIDが不正です',
+  no_receiver: '設定で受領者氏名を入力してください',
 };
 
 // GAS は script.google.com で 302 を返し、script.googleusercontent.com へリダイレクトする。
@@ -657,7 +661,7 @@ async function postToGas(payload) {
   }
 }
 
-function checkSettings() {
+function checkSettings({ needReceiver = true } = {}) {
   // 個人: /macros/s/…/exec、Workspace: /a/macros/<ドメイン>/s/…/exec
   if (!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/.test(settings.gasUrl)) {
     toast('設定で GAS の URL（/exec で終わるもの）を入力してください', 5000);
@@ -666,6 +670,11 @@ function checkSettings() {
   }
   if (!settings.token) {
     toast('設定でトークンを入力してください', 5000);
+    openSettings();
+    return false;
+  }
+  if (needReceiver && !settings.receiver) {
+    toast('設定で受領者氏名を入力してください', 5000);
     openSettings();
     return false;
   }
@@ -682,6 +691,7 @@ async function sendOne(it) {
       action: 'add',
       token: settings.token,
       cardId: rec.id,
+      receiver: settings.receiver,
       mimeType: rec.mime,
       capturedAt: rec.createdAt,
       image,
@@ -730,6 +740,7 @@ function openSettings() {
   dlg.returnValue = '';
   $('#in-url').value = settings.gasUrl;
   $('#in-token').value = settings.token;
+  $('#in-receiver').value = settings.receiver;
   $('#in-sharp').value = settings.sharp;
   $('#in-auto').checked = settings.auto;
   dlg.showModal();
@@ -739,6 +750,7 @@ function readSettingsForm() {
   return {
     gasUrl: $('#in-url').value.trim(),
     token: $('#in-token').value.trim(),
+    receiver: $('#in-receiver').value.trim(),
     sharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.sharp,
     auto: $('#in-auto').checked,
   };
@@ -752,7 +764,7 @@ $('#btn-ping').addEventListener('click', async () => {
   const prev = settings;
   settings = s; // 入力中の値でテスト
   try {
-    if (!checkSettings()) return;
+    if (!checkSettings({ needReceiver: false })) return;
     const data = await postToGas({ action: 'ping', token: s.token });
     toast(data.ok ? '接続できました' : '接続エラー: ' + (ERROR_TEXT[data.error] || data.error), 5000);
   } catch (e) {
