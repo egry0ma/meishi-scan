@@ -162,6 +162,8 @@ const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目で�
 const GLARE_WAIT_MS = 10000;   // 2枚目をこの時間待っても撮れなければ、1枚目だけで保存する
 const GLARE_LOST_MS = 1500;    // 1枚目のあと名刺がこの時間見えなければ、1枚目だけで保存する
 const FUSE_LEVEL = 240;        // 合成時に「反射」として置き換える明るさ
+const SHEEN_MIN = 0.05;        // てかり（地の色が明るく薄くなった部分）がこの割合以上なら「反射あり」
+const SHEEN_REF_MIN_S = 60;    // 地の色の濃さ（0〜255）がこれ未満の名刺（白・灰色）は、てかりを判定しない
 // 静止とみなす角の移動量（名刺の対角線比）。画面ではなく名刺の大きさを基準にするので、
 // 近づいて手ぶれが画面上で大きく見えても、判定の厳しさが変わらない
 const STABLE_TOL = 0.025;
@@ -572,17 +574,21 @@ function detect() {
       clipped = clip / n;
     }
 
-    // 反射の位置：名刺を正方形に正規化した小さな画像での白飛びマスク（2枚合成で、反射が動いたかの判定に使う）
+    // 反射の位置：名刺を正方形に正規化した小さな画像で、白飛びとてかりの画素を 1 にする
+    // （2枚合成で、反射が動いたかの判定に使う）
     const MS = GLARE_MASK_SIZE;
     const sTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, best.flatMap((p) => [p.x, p.y])));
     const dTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, MS, 0, MS, MS, 0, MS]));
     const Ms = keep(cv.getPerspectiveTransform(sTri, dTri));
+    const smallColor = keep(new cv.Mat());
+    cv.warpPerspective(src, smallColor, Ms, new cv.Size(MS, MS));
     const small = keep(new cv.Mat());
-    cv.warpPerspective(gray, small, Ms, new cv.Size(MS, MS));
+    cv.cvtColor(smallColor, small, cv.COLOR_RGBA2GRAY);
+    const sh = sheenPixels(smallColor);
     const mask = new Uint8Array(MS * MS);
-    for (let i = 0; i < mask.length; i++) mask[i] = small.data[i] >= CLIP_LEVEL ? 1 : 0;
+    for (let i = 0; i < mask.length; i++) mask[i] = small.data[i] >= CLIP_LEVEL || sh.mask[i] ? 1 : 0;
 
-    return { quad: best, method, sharp, clipped, paper, fill, mask, scale, pw, ph };
+    return { quad: best, method, sharp, clipped, paper, sheen: sh.frac, fill, mask, scale, pw, ph };
   } finally {
     for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
   }
@@ -610,7 +616,70 @@ function drawOverlay(r) {
 }
 
 // 紙の地の色よりはっきり明るい、真っ白な部分があるときだけ「反射」とみなす
-const hasGlare = (r) => r.clipped >= GLARE_MIN && r.paper < PAPER_MAX;
+// または、色の付いた名刺で、照明が映り込んで地の色が明るく薄くなった「てかり」が一定以上あるとき
+const hasGlare = (r) => (r.clipped >= GLARE_MIN && r.paper < PAPER_MAX) || r.sheen >= SHEEN_MIN;
+
+/**
+ * てかりの画素を求める：照明の白い光が混ざって、名刺の地の色より明るく・色が薄くなった部分。
+ * 地の色は、色の濃さが上位 25% 付近の画素（てかりで薄まっていない部分）から決める。
+ * 印刷された白（ロゴや白文字）は色がほぼ完全に抜けているので含めない。
+ * 地の色がもともと薄い名刺（白・灰色）は区別できないので判定しない（白飛びの判定に任せる）。
+ * rgba は小さく縮めた名刺の画像。{ mask: Uint8Array（1 がてかり）, frac: 割合 } を返す。
+ */
+function sheenPixels(rgba) {
+  const n = rgba.rows * rgba.cols;
+  const none = { mask: new Uint8Array(n), frac: 0 };
+  const rgb = new cv.Mat(), hsv = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+    const d = hsv.data;
+    const sHist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) sHist[d[i * 3 + 1]]++;
+    let refS = 0;
+    for (let v = 0, acc = 0; v < 256; v++) { acc += sHist[v]; if (acc >= n * 0.75) { refS = v; break; } }
+    if (refS < SHEEN_REF_MIN_S) return none;
+    // 地の色の明るさ（中央値）と色相（最頻値）
+    const vHist = new Uint32Array(256), hHist = new Uint32Array(180);
+    let cnt = 0;
+    for (let i = 0; i < n; i++) if (d[i * 3 + 1] >= refS * 0.85) { vHist[d[i * 3 + 2]]++; hHist[d[i * 3]]++; cnt++; }
+    let refV = 0;
+    for (let v = 0, acc = 0; v < 256; v++) { acc += vHist[v]; if (acc >= cnt / 2) { refV = v; break; } }
+    let hue = 0;
+    for (let h = 1; h < 180; h++) if (hHist[h] > hHist[hue]) hue = h;
+    const mask = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const h = d[i * 3], s = d[i * 3 + 1], v = d[i * 3 + 2];
+      const dh = Math.min(Math.abs(h - hue), 180 - Math.abs(h - hue));
+      if (s >= refS * 0.12 && s < refS * 0.7 && v > refV + 25 && dh <= 15) mask[i] = 1;
+    }
+    // 白文字の縁などの細い部分を除く（3x3 のオープニング）
+    const opened = openMask(mask, rgba.cols, rgba.rows);
+    let k = 0;
+    for (let i = 0; i < n; i++) k += opened[i];
+    return { mask: opened, frac: k / n };
+  } finally {
+    rgb.delete(); hsv.delete();
+  }
+}
+
+/** 0/1 のマスクに 3x3 のオープニング（収縮してから膨張）をかける */
+function openMask(m, w, h) {
+  const ero = new Uint8Array(m.length), out = new Uint8Array(m.length);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    let all = 1;
+    for (let dy = -1; dy <= 1 && all; dy++) for (let dx = -1; dx <= 1; dx++) if (!m[(y + dy) * w + x + dx]) { all = 0; break; }
+    ero[y * w + x] = all;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!ero[y * w + x]) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const yy = y + dy, xx = x + dx;
+      if (yy >= 0 && yy < h && xx >= 0 && xx < w) out[yy * w + xx] = 1;
+    }
+  }
+  return out;
+}
 const sharpEnough = (r) => r.sharp >= settings.minSharp && r.sharp >= state.peak * PEAK_RATIO;
 const QUAD_COLORS = { wait: '#9a9a9f', glare: '#e5484d', focus: '#e0a321', ready: '#2f9e6b' };
 /** 枠の色を決める状態（撮影の可否の判定は onDetect で行う） */
@@ -638,8 +707,9 @@ function autoExposure(r, now) {
   const ex = state.exposure;
   if (!ex.supported || !state.stream || now - ex.lastAdjust < 500) return;
   let next = ex.value;
-  if (r.clipped >= GLARE_MIN) next = Math.max(ex.min, ex.value - ex.step);
-  else if (r.clipped < GLARE_MIN / 4 && r.paper < 200 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
+  const sheen = r.sheen || 0;
+  if (r.clipped >= GLARE_MIN || sheen >= SHEEN_MIN) next = Math.max(ex.min, ex.value - ex.step);
+  else if (r.clipped < GLARE_MIN / 4 && sheen < SHEEN_MIN / 4 && r.paper < 200 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
   if (next === ex.value) return;
   ex.value = next; ex.lastAdjust = now;
   const track = state.stream.getVideoTracks()[0];
@@ -682,7 +752,7 @@ function showDebug(r, m, now) {
     const moveText = Number.isFinite(m.move) ? pct(m.move) : '—';
     lines.push(`静止: ${Math.min(STABLE_MS, Math.round(m.stableFor))} / ${STABLE_MS}ms（動き ${moveText}・${pct(STABLE_TOL)} 以下）${ok(m.stableFor >= STABLE_MS)}`);
     lines.push(`ピント: ${Math.round(r.sharp)}（最高 ${Math.round(state.peak)} の ${PEAK_RATIO * 100}% 以上・下限 ${settings.minSharp}）${ok(sharpEnough(r))}`);
-    lines.push(`反射: 白飛び ${pct(r.clipped)}・紙の明るさ ${r.paper}（${pct(GLARE_MIN)} 以上かつ ${PAPER_MAX} 未満で反射）${hasGlare(r) ? '反射あり' : 'なし'}`);
+    lines.push(`反射: 白飛び ${pct(r.clipped)}・紙の明るさ ${r.paper}（${pct(GLARE_MIN)} 以上かつ ${PAPER_MAX} 未満で反射）／てかり ${pct(r.sheen)}（${pct(SHEEN_MIN)} 以上で反射）${hasGlare(r) ? '反射あり' : 'なし'}`);
     if (g) lines.push(`2枚目待ち: 傾け ${ok(g.moved)} / 反射の重なり ${pct(glareOverlap(g.mask, r.mask))}（${pct(GLARE_OVERLAP_MAX)} 以下）${ok(glareOverlap(g.mask, r.mask) <= GLARE_OVERLAP_MAX)}`);
     if (!state.armed) lines.push('撮影済み: 名刺を画面から外すと次を撮れます');
   }
@@ -821,6 +891,21 @@ function fuseGlare(a, b) {
     cv.cvtColor(b, gb, cv.COLOR_RGBA2GRAY);
     const region = keep(new cv.Mat());
     cv.threshold(ga, region, FUSE_LEVEL - 1, 255, cv.THRESH_BINARY);
+    // てかり（真っ白にはならない反射）も置き換える範囲に含める。小さく縮めて判定し、元の大きさに戻す
+    {
+      const sw = 160, shh = Math.max(1, Math.round(160 * a.rows / a.cols));
+      const smallA = keep(new cv.Mat());
+      cv.resize(a, smallA, new cv.Size(sw, shh), 0, 0, cv.INTER_AREA);
+      const sh = sheenPixels(smallA);
+      if (sh.frac > 0) {
+        const sm = keep(new cv.Mat(shh, sw, cv.CV_8UC1));
+        for (let i = 0; i < sh.mask.length; i++) sm.data[i] = sh.mask[i] ? 255 : 0;
+        const big = keep(new cv.Mat());
+        cv.resize(sm, big, new cv.Size(a.cols, a.rows), 0, 0, cv.INTER_LINEAR);
+        cv.threshold(big, big, 127, 255, cv.THRESH_BINARY);
+        cv.bitwise_or(region, big, region);
+      }
+    }
     // 反射の周りのにじみも含めるよう広げる
     const rad = Math.max(3, Math.round(Math.max(a.cols, a.rows) * 0.03));
     const kernel = keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(rad * 2 + 1, rad * 2 + 1)));
