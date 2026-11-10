@@ -107,8 +107,9 @@
     <label for="in-receiver">受領者氏名（「連絡先受領者氏名」列に入ります）</label>
     <input id="in-receiver" type="text" autocomplete="name" placeholder="例：山田 太郎">
     <p class="hint">送信するすべての名刺に入ります。他の人が受け取った名刺を送るときは、送信前に変更してください。</p>
-    <label for="in-sharp">ピントのしきい値（撮影中の画面下のバーに現在値が出ます）</label>
+    <label for="in-sharp">ピントの下限（通常は変更不要）</label>
     <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
+    <p class="hint">静止中にいちばんピントが合った状態に近づいたら撮影します。これより低い値のときは、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
     <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
     <div class="row">
       <button type="button" id="btn-ping">接続テスト</button>
@@ -141,7 +142,13 @@ const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-rel
 const OPENCV_SRI = 'sha384-XsTfGA62I8LzqS3D7IcgiSOCrJuECWLcg4s1M0AnrkDCcJ8lXX+j+qdg+o6t7KZa';
 const PROC_MAX = 640;        // 検出用に縮小する長辺(px)
 const DETECT_INTERVAL = 100; // 検出の間隔(ms)
-const MIN_AREA = 0.12;       // 画面に対する四角形の最小面積比
+const MIN_AREA = 0.03;       // 検出する四角形の最小面積比（向きに依らず拾えるよう小さめ）
+const MIN_FILL = 0.4;        // 撮影に必要な大きさ：名刺が画面の縦か横のこの割合以上を占める
+const PEAK_RATIO = 0.85;     // 静止中のピントの最高値に対して、この割合以上になったら撮影
+const CLIP_LEVEL = 250;      // これ以上の明るさを「真っ白（白飛び）」とみなす
+const GLARE_MIN = 0.008;     // 名刺の内側で真っ白な画素がこの割合以上あり、かつ…
+const PAPER_MAX = 235;       // …紙の地の色（明るさの中央値）がこれ未満なら「反射あり」。
+                             // 地の色自体がこれ以上明るい白い名刺は、反射と紙の白さを見分けられないので止めない
 const STABLE_TOL = 0.012;    // 静止とみなす角の移動量（対角線比）
 const STABLE_MS = 600;       // この時間静止したら撮影候補
 const REARM_MS = 400;        // 名刺が見えなくなってからこの時間で次の撮影を許可
@@ -162,12 +169,14 @@ const overlayCtx = overlay.getContext('2d');
 let cv = null;
 const state = {
   stream: null, running: false, wantRunning: false, loopId: 0, lastTick: 0,
-  kernel: null, prev: null, stableSince: 0, lostSince: 0, armed: true,
+  kernel: null, prev: null, stableSince: 0, lostSince: 0, armed: true, peak: 0,
+  exposure: { supported: false, min: 0, max: 0, step: 0, value: 0, lastAdjust: 0 },
   capturing: false, last: null, items: [], sending: false, wakeLock: null,
 };
 
 // ===== 設定 =====
-const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', sharp: 60, auto: true };
+// minSharp はピントの下限（以前の sharp は意味が変わったので引き継がない）
+const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 25, auto: true };
 function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_SETTINGS }; }
@@ -325,12 +334,22 @@ async function startCamera() {
 
     const track = stream.getVideoTracks()[0];
     track.addEventListener('ended', () => { if (state.running) stopCamera(false); });
+    const caps = (() => { try { return track.getCapabilities ? track.getCapabilities() : {}; } catch { return {}; } })();
     try {
-      const caps = track.getCapabilities ? track.getCapabilities() : {};
       if (caps.focusMode && caps.focusMode.includes('continuous')) {
         await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
       }
     } catch { /* 対応していない端末は無視 */ }
+    // 露出補正に対応していれば、反射したときに自動で暗くできるようにする
+    const ec = caps.exposureCompensation;
+    const ex = state.exposure;
+    ex.supported = !!(ec && typeof ec.min === 'number' && typeof ec.max === 'number' && ec.min < 0);
+    if (ex.supported) {
+      ex.min = ec.min; ex.max = ec.max;
+      ex.step = Math.max(ec.step || 0, (ec.max - ec.min) / 12);
+      ex.value = 0; ex.lastAdjust = 0;
+      track.applyConstraints({ advanced: [{ exposureCompensation: 0 }] }).catch(() => { ex.supported = false; });
+    }
 
     try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* 任意 */ }
 
@@ -451,22 +470,42 @@ function detect() {
     }
     if (!best) return { quad: null, scale, pw, ph };
 
-    // ピント判定：四角形の内側（少し内寄せ）のラプラシアン分散
     const xs = best.map((p) => p.x), ys = best.map((p) => p.y);
     let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    // 画面の縦か横のどちらかをどれだけ占めているか（名刺の向きに依らない大きさの目安）
+    const fill = Math.max((x1 - x0) / pw, (y1 - y0) / ph);
+
+    // 四角形の内側（少し内寄せ）で、ピント・白飛び・明るさを測る
     const ix = (x1 - x0) * 0.15, iy = (y1 - y0) * 0.15;
     x0 = Math.max(0, Math.round(x0 + ix)); y0 = Math.max(0, Math.round(y0 + iy));
     x1 = Math.min(pw, Math.round(x1 - ix)); y1 = Math.min(ph, Math.round(y1 - iy));
-    let sharp = 0;
+    let sharp = 0, clipped = 0, paper = 0;
     if (x1 - x0 > 8 && y1 - y0 > 8) {
       const roi = keep(gray.roi(new cv.Rect(x0, y0, x1 - x0, y1 - y0)));
+      // ピント：ラプラシアン分散
       const lap = keep(new cv.Mat());
       cv.Laplacian(roi, lap, cv.CV_64F);
       const mean = keep(new cv.Mat()), std = keep(new cv.Mat());
       cv.meanStdDev(lap, mean, std);
       sharp = std.data64F[0] ** 2;
+      // 明るさのヒストグラム：真っ白な画素の割合と、紙の地の色（中央値）
+      const hist = new Uint32Array(256);
+      const data = gray.data;
+      for (let y = y0; y < y1; y++) {
+        const row = y * pw;
+        for (let x = x0; x < x1; x++) hist[data[row + x]]++;
+      }
+      const n = (x1 - x0) * (y1 - y0);
+      let acc = 0, clip = 0;
+      paper = 255;
+      for (let v = 0; v < 256; v++) {
+        if (acc < n / 2 && acc + hist[v] >= n / 2) paper = v;
+        acc += hist[v];
+        if (v >= CLIP_LEVEL) clip += hist[v];
+      }
+      clipped = clip / n;
     }
-    return { quad: best, sharp, scale, pw, ph };
+    return { quad: best, sharp, clipped, paper, fill, scale, pw, ph };
   } finally {
     for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
   }
@@ -483,7 +522,7 @@ function drawOverlay(r) {
   const s = Math.min(W / r.pw, H / r.ph);
   const ox = (W - r.pw * s) / 2, oy = (H - r.ph * s) / 2;
   overlayCtx.lineWidth = 3 * dpr;
-  overlayCtx.strokeStyle = !state.armed ? '#9a9a9f' : r.sharp >= settings.sharp ? '#2f9e6b' : '#e0a321';
+  overlayCtx.strokeStyle = QUAD_COLORS[readiness(r)];
   overlayCtx.beginPath();
   r.quad.forEach((p, i) => {
     const x = ox + p.x * s, y = oy + p.y * s;
@@ -493,16 +532,45 @@ function drawOverlay(r) {
   overlayCtx.stroke();
 }
 
+// 紙の地の色よりはっきり明るい、真っ白な部分があるときだけ「反射」とみなす
+const hasGlare = (r) => r.clipped >= GLARE_MIN && r.paper < PAPER_MAX;
+const sharpEnough = (r) => r.sharp >= settings.minSharp && r.sharp >= state.peak * PEAK_RATIO;
+const QUAD_COLORS = { wait: '#9a9a9f', glare: '#e5484d', focus: '#e0a321', ready: '#2f9e6b' };
+/** 枠の色を決める状態（撮影の可否の判定は onDetect で行う） */
+function readiness(r) {
+  if (!state.armed || r.fill < MIN_FILL) return 'wait';
+  if (hasGlare(r)) return 'glare';
+  return sharpEnough(r) ? 'ready' : 'focus';
+}
+
 function updateMeter(sharp) {
-  const ratio = Math.min(1, sharp / Math.max(1, settings.sharp * 1.5));
+  // 静止中の最高値を基準にしたピントの度合い
+  const ratio = Math.min(1, sharp / Math.max(1, state.peak, settings.minSharp));
   meter.firstElementChild.style.width = (ratio * 100).toFixed(0) + '%';
-  meter.classList.toggle('ok', sharp >= settings.sharp);
+  meter.classList.toggle('ok', sharp > 0 && sharp >= settings.minSharp && sharp >= state.peak * PEAK_RATIO);
   meter.title = 'ピント: ' + Math.round(sharp);
+}
+
+/**
+ * 露出の自動調整（カメラが露出補正に対応している場合のみ。iPhone の Safari などは非対応）。
+ * 真っ白な部分があれば（反射でも、白い紙が飛んでいるだけでも）少し暗くし、
+ * 白飛びが無く紙が暗すぎるときは 0 まで戻す。
+ */
+function autoExposure(r, now) {
+  const ex = state.exposure;
+  if (!ex.supported || !state.stream || now - ex.lastAdjust < 500) return;
+  let next = ex.value;
+  if (r.clipped >= GLARE_MIN) next = Math.max(ex.min, ex.value - ex.step);
+  else if (r.paper < 120 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
+  if (next === ex.value) return;
+  ex.value = next; ex.lastAdjust = now;
+  const track = state.stream.getVideoTracks()[0];
+  track.applyConstraints({ advanced: [{ exposureCompensation: next }] }).catch(() => { ex.supported = false; });
 }
 
 function onDetect(r, now) {
   if (!r.quad) {
-    state.prev = null; state.stableSince = 0;
+    state.prev = null; state.stableSince = 0; state.peak = 0;
     if (!state.lostSince) state.lostSince = now;
     if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
     updateMeter(0);
@@ -510,16 +578,26 @@ function onDetect(r, now) {
     return;
   }
   state.lostSince = 0;
-  updateMeter(r.sharp);
+  autoExposure(r, now);
   const diag = Math.hypot(r.pw, r.ph);
   const move = state.prev ? Math.max(...r.quad.map((p, i) => dist(p, state.prev[i]))) / diag : Infinity;
   state.prev = r.quad;
-  if (move > STABLE_TOL) state.stableSince = now;
+  // 動いたら静止の計測とピントの最高値をやり直す
+  if (move > STABLE_TOL) { state.stableSince = now; state.peak = 0; }
+  state.peak = Math.max(state.peak, r.sharp);
+  updateMeter(r.sharp);
 
   if (!state.armed) { setStatus('撮影済み — 次の名刺に替えてください'); return; }
+  if (r.fill < MIN_FILL) { setStatus('もう少し近づけてください'); return; }
+  if (hasGlare(r)) {
+    setStatus(state.exposure.supported
+      ? '反射を抑えています…（角度を少し変えると早く撮れます）'
+      : '光が反射しています。名刺の角度を少し変えてください（手動撮影もできます）');
+    return;
+  }
   const stableFor = now - state.stableSince;
   if (stableFor < STABLE_MS) { setStatus('静止してください'); return; }
-  if (r.sharp < settings.sharp) { setStatus(`ピント合わせ中（${Math.round(r.sharp)} / ${settings.sharp}）`); return; }
+  if (!sharpEnough(r)) { setStatus('ピント合わせ中…'); return; }
   if (!settings.auto) { setStatus('撮影できます（手動撮影）'); return; }
   capture(r.quad, r.scale);
 }
@@ -741,7 +819,7 @@ function openSettings() {
   $('#in-url').value = settings.gasUrl;
   $('#in-token').value = settings.token;
   $('#in-receiver').value = settings.receiver;
-  $('#in-sharp').value = settings.sharp;
+  $('#in-sharp').value = settings.minSharp;
   $('#in-auto').checked = settings.auto;
   dlg.showModal();
 }
@@ -751,7 +829,7 @@ function readSettingsForm() {
     gasUrl: $('#in-url').value.trim(),
     token: $('#in-token').value.trim(),
     receiver: $('#in-receiver').value.trim(),
-    sharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.sharp,
+    minSharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.minSharp,
     auto: $('#in-auto').checked,
   };
 }
