@@ -161,6 +161,7 @@ const GLARE_TILT = 0.04;       // 1枚目のあと、角がこの量（名刺の
 const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目でも反射している割合がこれ以下なら2枚目を撮る
 const GLARE_WAIT_MS = 10000;   // 2枚目をこの時間待っても撮れなければ、1枚目だけで保存する
 const GLARE_LOST_MS = 1500;    // 1枚目のあと名刺がこの時間見えなければ、1枚目だけで保存する
+const EXPOSURE_FLOOR = -1.5;   // 露出補正をこれより下げない（暗くなりすぎて名刺が見つからなくなるのを防ぐ）
 const FUSE_LEVEL = 240;        // 合成時に「反射」として置き換える明るさ
 const SHEEN_MIN = 0.05;        // てかり（地の色が明るく薄くなった部分）がこの割合以上なら「反射あり」
 const SHEEN_REF_MIN_S = 60;    // 地の色の濃さ（0〜255）がこれ未満の名刺（白・灰色）は、てかりを判定しない
@@ -188,7 +189,7 @@ const state = {
   stream: null, running: false, wantRunning: false, loopId: 0, lastTick: 0,
   kernel: null, prev: null, stableSince: 0, lostSince: 0, armed: true, peak: 0,
   glare: null, // 反射ありで1枚目を撮ったあと、2枚目を待っている間の { mat, mask, at, moved }
-  exposure: { supported: false, min: 0, max: 0, step: 0, value: 0, lastAdjust: 0 },
+  exposure: { supported: false, min: 0, max: 0, step: 0, unit: 0, value: 0, lastAdjust: 0 },
   capturing: false, last: null, items: [], sending: false, wakeLock: null,
 };
 
@@ -363,7 +364,7 @@ async function startCamera() {
     const ex = state.exposure;
     ex.supported = !!(ec && typeof ec.min === 'number' && typeof ec.max === 'number' && ec.min < 0);
     if (ex.supported) {
-      ex.min = ec.min; ex.max = ec.max;
+      ex.min = ec.min; ex.max = ec.max; ex.unit = ec.step || 0;
       ex.step = Math.max(ec.step || 0, (ec.max - ec.min) / 12);
       ex.value = 0; ex.lastAdjust = 0;
       track.applyConstraints({ advanced: [{ exposureCompensation: 0 }] }).catch(() => { ex.supported = false; });
@@ -699,21 +700,31 @@ function updateMeter(sharp) {
 
 /**
  * 露出の自動調整（カメラが露出補正に対応している場合のみ。iPhone の Safari などは非対応）。
- * 真っ白な部分があれば（反射でも、白い紙が飛んでいるだけでも）少し暗くし、
- * 白飛びがほぼ無く、紙が明るすぎないときは 0 まで少しずつ戻す。
- * 名刺が見つからないときは、画面中央の白飛び（r.clipped に入れて渡す）が多ければ暗くする。
+ * 真っ白な白飛びがあるときだけ少し暗くする（-1.5 まで）。白飛びが無くなれば 0 に向けて少しずつ戻す。
+ * てかりは名刺の地の色との比べ方で判定するので、露出を下げても消えない。てかりは2枚撮りの合成に任せる。
+ * r.clipped は名刺の内側の白飛び（名刺が見つからないときは画面中央の白飛びを入れて渡す）。
  */
 function autoExposure(r, now) {
   const ex = state.exposure;
   if (!ex.supported || !state.stream || now - ex.lastAdjust < 500) return;
+  const floor = Math.max(ex.min, EXPOSURE_FLOOR);
   let next = ex.value;
-  const sheen = r.sheen || 0;
-  if (r.clipped >= GLARE_MIN || sheen >= SHEEN_MIN) next = Math.max(ex.min, ex.value - ex.step);
-  else if (r.clipped < GLARE_MIN / 4 && sheen < SHEEN_MIN / 4 && r.paper < 200 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
-  if (next === ex.value) return;
-  ex.value = next; ex.lastAdjust = now;
+  if (r.clipped >= GLARE_MIN) next = Math.max(floor, ex.value - ex.step);
+  else if (r.clipped < GLARE_MIN / 4 && r.paper < 220 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
+  setExposure(next, now);
+}
+
+/** 露出補正を変える（同じ値なら何もしない） */
+function setExposure(value, now = performance.now()) {
+  const ex = state.exposure;
+  if (!ex.supported || !state.stream) return;
+  // カメラが受け付ける刻み（caps.step）にそろえる。そろっていない値は拒否されることがある
+  if (ex.unit > 0) value = Math.round(value / ex.unit) * ex.unit;
+  value = Math.min(ex.max, Math.max(ex.min, value));
+  if (Math.abs(value - ex.value) < 1e-6) return;
+  ex.value = value; ex.lastAdjust = now;
   const track = state.stream.getVideoTracks()[0];
-  track.applyConstraints({ advanced: [{ exposureCompensation: next }] }).catch(() => { ex.supported = false; });
+  track.applyConstraints({ advanced: [{ exposureCompensation: value }] }).catch(() => { ex.supported = false; });
 }
 
 /** 1枚目で反射していた位置のうち、今も反射している割合 */
@@ -771,7 +782,8 @@ function onDetect(r, now) {
     if (g && now - state.lostSince > GLARE_LOST_MS) { finishGlareAlone('名刺が外れたため、反射が残ったまま保存しました'); return; }
     if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
     // 名刺が見つからなくても、画面中央が大きく白飛びしていれば露出を下げる（戻すのは名刺が見えてから）
-    if (r.centerClipped >= 0.03) autoExposure({ clipped: r.centerClipped, paper: 255 }, now);
+    // 名刺が見つからないときも、画面中央の白飛びで露出を調整する（白飛びが無ければ 0 に戻していく）
+    autoExposure({ clipped: r.centerClipped >= 0.03 ? r.centerClipped : 0, paper: 0 }, now);
     updateMeter(0);
     showDebug(r, null, now);
     setStatus(g ? TILT_MSG : state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
@@ -1033,6 +1045,8 @@ async function saveMat(mat) {
   await dbPut(rec);
   addItem(rec);
   renderTray();
+  // 次の名刺は普通の明るさから始める
+  setExposure(0);
 }
 
 // ===== 送信 =====
