@@ -176,7 +176,7 @@ const state = {
 
 // ===== 設定 =====
 // minSharp はピントの下限（以前の sharp は意味が変わったので引き継がない）
-const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 25, auto: true };
+const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 10, auto: true };
 function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_SETTINGS }; }
