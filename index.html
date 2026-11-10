@@ -70,6 +70,11 @@
   .row button { flex: 1; }
   .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--text); }
   .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
+  .who { font-size: 13px; padding: 8px 10px; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who.out { border-color: var(--warn); color: var(--warn); }
+  #login-button { min-height: 44px; margin-top: 4px; }
+  details.admin { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
+  details.admin summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   .qr { background: #fff; padding: 12px; border-radius: 8px; width: min(280px, 100%); margin: 8px auto; }
   .qr img { width: 100%; height: auto; display: block; image-rendering: pixelated; }
   .hint.warn { color: var(--warn); }
@@ -83,6 +88,7 @@
 <body>
 <header>
   <h1>名刺スキャン</h1>
+  <button id="btn-who" type="button" class="who">ログイン</button>
   <button id="btn-settings" type="button">設定</button>
 </header>
 
@@ -106,24 +112,30 @@
 <dialog id="dlg-settings">
   <form method="dialog" id="form-settings">
     <h2>設定</h2>
-    <label for="in-url">GAS ウェブアプリの URL（/exec で終わるもの）</label>
-    <input id="in-url" type="url" inputmode="url" autocomplete="off" spellcheck="false"
-      placeholder="https://script.google.com/macros/s/…/exec">
-    <label for="in-token">トークン（setup() で作られた TOKEN）</label>
-    <input id="in-token" type="password" autocomplete="off" spellcheck="false">
-    <p class="hint">URL とトークンはこの端末のブラウザ（localStorage）にだけ保存されます。</p>
-    <label for="in-receiver">受領者氏名（「連絡先受領者氏名」列に入ります）</label>
-    <input id="in-receiver" type="text" autocomplete="name" placeholder="例：山田 太郎">
-    <p class="hint">送信するすべての名刺に入ります。他の人が受け取った名刺を送るときは、送信前に変更してください。</p>
+    <label>Google アカウント</label>
+    <p class="hint" id="login-status"></p>
+    <div id="login-button"></div>
+    <button type="button" id="btn-logout" hidden>ログアウト</button>
+    <p class="hint">組織の Google アカウントでログインすると送信できます。ログインした名前が「連絡先受領者氏名」に入ります。</p>
     <label for="in-sharp">ピントの下限（通常は変更不要）</label>
     <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
     <p class="hint">静止中にいちばんピントが合った状態に近づいたら撮影します。これより低い値のときは、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
     <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
     <label class="check"><input id="in-debug" type="checkbox"> 判定の詳細を表示する（撮れないときの原因調べ用）</label>
-    <div class="row">
-      <button type="button" id="btn-ping">接続テスト</button>
-      <button type="button" id="btn-share">ベータ参加用の QR を表示</button>
-    </div>
+    <details class="admin" id="admin">
+      <summary>管理者向け（送信先の設定・参加用 QR）</summary>
+      <label for="in-url">GAS ウェブアプリの URL（/exec で終わるもの）</label>
+      <input id="in-url" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+        placeholder="https://script.google.com/macros/s/…/exec">
+      <label for="in-client">Google の OAuth クライアント ID</label>
+      <input id="in-client" type="text" autocomplete="off" spellcheck="false"
+        placeholder="1234567890-xxxx.apps.googleusercontent.com">
+      <p class="hint">ふつうは参加用の QR から自動で入るので、入力は不要です。</p>
+      <div class="row">
+        <button type="button" id="btn-ping">接続テスト</button>
+        <button type="button" id="btn-share">参加用の QR を表示</button>
+      </div>
+    </details>
     <div class="row">
       <button value="cancel" type="submit">閉じる</button>
       <button value="save" type="submit" class="primary" id="btn-save">保存</button>
@@ -132,12 +144,12 @@
 </dialog>
 
 <dialog id="dlg-share">
-  <h2>ベータ参加用の設定 QR</h2>
-  <p class="hint">スマホのカメラでこの QR を読み取ると、撮影ページが開き、送信先（GAS の URL）とトークンが設定されます。受領者氏名は各自で入力してもらいます。</p>
+  <h2>参加用の QR</h2>
+  <p class="hint">スマホのカメラでこの QR を読み取ると、撮影ページが開き、送信先が設定されます。あとは各自が組織の Google アカウントでログインするだけです。</p>
   <div class="qr" id="share-qr"></div>
   <label for="share-link">設定済みリンク（QR と同じ内容）</label>
   <input id="share-link" type="text" readonly>
-  <p class="hint warn">この QR とリンクは合言葉そのものです。持っている人は誰でも名簿に書き込めます。渡す相手を限り、グループチャットなどに貼りっぱなしにしないでください。漏れたときは GAS で rotateToken() を実行してトークンを作り直します（全員が設定し直しになります）。</p>
+  <p class="hint">この QR に合言葉は入っていません。送信できるのは、許可したドメイン（GAS の ALLOWED_DOMAIN）の Google アカウントでログインした人だけです。</p>
   <div class="row">
     <button type="button" id="btn-copy-link">リンクをコピー</button>
     <button type="button" id="btn-close-share">閉じる</button>
@@ -168,6 +180,10 @@ const QR_URL = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qr
 const QR_SRI = 'sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1';
 // 個人: /macros/s/…/exec、Workspace: /a/macros/<ドメイン>/s/…/exec
 const GAS_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/;
+const CLIENT_ID_RE = /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/;
+// Google アカウントでのログイン（Google Identity Services）。Google が随時更新するため SRI は付けられない
+const GIS_URL = 'https://accounts.google.com/gsi/client';
+const AUTH_KEY = 'meishi-scan.auth.v1';
 const PROC_MAX = 640;        // 検出用に縮小する長辺(px)
 const DETECT_INTERVAL = 100; // 検出の間隔(ms)
 const MIN_AREA = 0.03;       // 検出する四角形の最小面積比（向きに依らず拾えるよう小さめ）
@@ -220,12 +236,19 @@ const state = {
 
 // ===== 設定 =====
 // minSharp はピントの下限（以前の sharp は意味が変わったので引き継がない）
-const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 10, auto: true, debug: false };
+const DEFAULT_SETTINGS = { gasUrl: '', clientId: '', minSharp: 10, auto: true, debug: false };
+const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 function loadSettings() {
-  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
-  catch { return { ...DEFAULT_SETTINGS }; }
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {}; } catch { /* 既定値を使う */ }
+  // 以前の版で保存した合言葉（token）や受領者氏名（receiver）は読み込まない（下で保存し直して消す）
+  const out = { ...DEFAULT_SETTINGS };
+  for (const k of SETTING_KEYS) if (k in saved) out[k] = saved[k];
+  return { out, stale: Object.keys(saved).some((k) => !SETTING_KEYS.includes(k)) };
 }
-let settings = loadSettings();
+const loaded = loadSettings();
+let settings = loaded.out;
+if (loaded.stale) { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* noop */ } }
 function saveSettings(s) {
   settings = s;
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
@@ -1087,12 +1110,12 @@ function blobToBase64(buf, type) {
 }
 
 const ERROR_TEXT = {
-  unauthorized: 'トークンが違います',
-  not_configured: 'GAS の setup() が未実行です',
+  login_required: 'ログインの有効期限が切れました。もう一度ログインしてください',
+  not_allowed: 'このアカウントでは送信できません（組織の Google アカウントでログインしてください）',
+  not_configured: 'GAS の設定（CLIENT_ID か ALLOWED_DOMAIN）が未完了です',
   processing: '別の送信が処理中です（後で再送してください）',
   bad_image: '画像が大きすぎるか壊れています',
   bad_card_id: 'カードIDが不正です',
-  no_receiver: '設定で受領者氏名を入力してください',
 };
 
 // GAS は script.google.com で 302 を返し、script.googleusercontent.com へリダイレクトする。
@@ -1127,19 +1150,14 @@ async function postToGas(payload) {
   }
 }
 
-function checkSettings({ needReceiver = true } = {}) {
-  if (!GAS_URL_RE.test(settings.gasUrl)) {
-    toast('設定で GAS の URL（/exec で終わるもの）を入力してください', 5000);
+function checkSettings({ needLogin = true } = {}) {
+  if (!GAS_URL_RE.test(settings.gasUrl) || !CLIENT_ID_RE.test(settings.clientId)) {
+    toast('送信先が未設定です。管理者から参加用の QR をもらって読み取ってください', 6000);
     openSettings();
     return false;
   }
-  if (!settings.token) {
-    toast('設定でトークンを入力してください', 5000);
-    openSettings();
-    return false;
-  }
-  if (needReceiver && !settings.receiver) {
-    toast('設定で受領者氏名を入力してください', 5000);
+  if (needLogin && !currentAuth()) {
+    toast('Google アカウントでログインしてください', 5000);
     openSettings();
     return false;
   }
@@ -1154,14 +1172,16 @@ async function sendOne(it) {
     const image = await blobToBase64(rec.data, rec.mime);
     const data = await postToGas({
       action: 'add',
-      token: settings.token,
+      idToken: currentAuth()?.credential || '',
       cardId: rec.id,
-      receiver: settings.receiver,
       mimeType: rec.mime,
       capturedAt: rec.createdAt,
       image,
     });
-    if (!data.ok) throw new Error(ERROR_TEXT[data.error] || data.error || '不明なエラー');
+    if (!data.ok) {
+      if (data.error === 'login_required') clearAuth(); // 期限切れなど：ログインし直してもらう
+      throw new Error(ERROR_TEXT[data.error] || data.error || '不明なエラー');
+    }
     await dbDelete(it.id);
     removeItem(it.id);
     return data.duplicate ? 'duplicate' : 'ok';
@@ -1204,19 +1224,20 @@ function openSettings() {
   if (dlg.open) return; // 開いている間に呼ばれた場合（接続テスト中の入力不足など）
   dlg.returnValue = '';
   $('#in-url').value = settings.gasUrl;
-  $('#in-token').value = settings.token;
-  $('#in-receiver').value = settings.receiver;
+  $('#in-client').value = settings.clientId;
+  // 送信先が未設定のときだけ、管理者向けの欄を開いておく
+  $('#admin').open = !(GAS_URL_RE.test(settings.gasUrl) && CLIENT_ID_RE.test(settings.clientId));
   $('#in-sharp').value = settings.minSharp;
   $('#in-auto').checked = settings.auto;
   $('#in-debug').checked = settings.debug;
   dlg.showModal();
+  renderLogin();
 }
 function readSettingsForm() {
   const sharp = Number($('#in-sharp').value);
   return {
     gasUrl: $('#in-url').value.trim(),
-    token: $('#in-token').value.trim(),
-    receiver: $('#in-receiver').value.trim(),
+    clientId: $('#in-client').value.trim(),
     minSharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.minSharp,
     auto: $('#in-auto').checked,
     debug: $('#in-debug').checked,
@@ -1224,16 +1245,22 @@ function readSettingsForm() {
 }
 $('#btn-settings').addEventListener('click', openSettings);
 $('#dlg-settings').addEventListener('close', () => {
-  if ($('#dlg-settings').returnValue === 'save') { saveSettings(readSettingsForm()); toast('保存しました'); }
+  if ($('#dlg-settings').returnValue === 'save') {
+    const before = settings.clientId;
+    saveSettings(readSettingsForm());
+    toast('保存しました');
+    if (settings.clientId !== before) initLogin();
+  }
 });
 $('#btn-ping').addEventListener('click', async () => {
   const s = readSettingsForm();
   const prev = settings;
   settings = s; // 入力中の値でテスト
   try {
-    if (!checkSettings({ needReceiver: false })) return;
-    const data = await postToGas({ action: 'ping', token: s.token });
-    toast(data.ok ? '接続できました' : '接続エラー: ' + (ERROR_TEXT[data.error] || data.error), 5000);
+    if (!checkSettings()) return;
+    const data = await postToGas({ action: 'ping', idToken: currentAuth().credential });
+    if (data.error === 'login_required') clearAuth();
+    toast(data.ok ? `接続できました（受領者氏名は「${data.name}」になります）` : '接続エラー: ' + (ERROR_TEXT[data.error] || data.error), 6000);
   } catch (e) {
     toast('接続エラー: ' + e.message, 6000);
   } finally {
@@ -1288,39 +1315,144 @@ window.addEventListener('beforeunload', (e) => {
   if (state.sending) { e.preventDefault(); e.returnValue = ''; }
 });
 
+// ===== Google アカウントでのログイン =====
+// ログインすると Google から ID トークン（本人であることの証明。1時間で切れる）が届く。
+// 送信のたびにそれを GAS に送り、GAS が Google に問い合わせて本物か・許可したアカウントかを確かめる。
+// ID トークンはこのタブの sessionStorage にだけ置く（タブを閉じれば消える）。
+function decodeJwt(jwt) {
+  const part = jwt.split('.')[1] || '';
+  const bin = unb64url(part);
+  const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+function currentAuth() {
+  let a = null;
+  try { a = JSON.parse(sessionStorage.getItem(AUTH_KEY) || 'null'); } catch { /* なし扱い */ }
+  // 期限の1分前からは切れたものとして扱う
+  if (!a || !a.credential || !(a.exp * 1000 - 60000 > Date.now())) return null;
+  return a;
+}
+function clearAuth() {
+  try { sessionStorage.removeItem(AUTH_KEY); } catch { /* noop */ }
+  renderLogin();
+}
+function onCredential(resp) {
+  try {
+    const p = decodeJwt(resp.credential);
+    const a = { credential: resp.credential, name: p.name || p.email, email: p.email, exp: p.exp };
+    sessionStorage.setItem(AUTH_KEY, JSON.stringify(a));
+    toast(`${a.name} でログインしました`);
+  } catch (e) {
+    console.error(e);
+    toast('ログインできませんでした: ' + e.message, 5000);
+  }
+  renderLogin();
+}
+
+let gisLoading = null;
+function loadGis() {
+  if (window.google?.accounts?.id) return Promise.resolve(window.google.accounts.id);
+  if (!gisLoading) {
+    gisLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = GIS_URL;
+      s.async = true;
+      s.onload = () => (window.google?.accounts?.id ? resolve(window.google.accounts.id) : reject(new Error('ログインの部品を読み込めませんでした')));
+      s.onerror = () => { gisLoading = null; reject(new Error('ログインの部品を読み込めませんでした')); };
+      document.head.append(s);
+    });
+  }
+  return gisLoading;
+}
+
+let gisReadyFor = '', prompted = false;
+/** クライアント ID が設定されていれば、ログインの部品を準備する（未ログインならワンタップのログインを出す） */
+async function initLogin() {
+  renderLogin();
+  if (!CLIENT_ID_RE.test(settings.clientId)) return;
+  try {
+    const gid = await loadGis();
+    if (gisReadyFor !== settings.clientId) {
+      gid.initialize({
+        client_id: settings.clientId,
+        callback: onCredential,
+        auto_select: true, // 前にログインしたアカウントがあれば、そのまま自動でログイン
+        cancel_on_tap_outside: false,
+        ux_mode: 'popup',
+        itp_support: true,
+        use_fedcm_for_prompt: true,
+      });
+      gisReadyFor = settings.clientId;
+    }
+    renderLogin();
+    if (!currentAuth() && !prompted) { prompted = true; gid.prompt(); }
+  } catch (e) {
+    console.error(e);
+    $('#login-status').textContent = e.message;
+  }
+}
+
+/** ログインの状態を、ヘッダーと設定画面に反映する */
+function renderLogin() {
+  const a = currentAuth();
+  const who = $('#btn-who');
+  who.textContent = a ? a.name : 'ログイン';
+  who.classList.toggle('out', !a);
+  who.title = a ? a.email : 'Google アカウントでログイン';
+  const configured = CLIENT_ID_RE.test(settings.clientId);
+  $('#login-status').textContent = a
+    ? `${a.name}（${a.email}）でログイン中`
+    : configured ? 'ログインしていません' : '送信先が未設定です。管理者から参加用の QR をもらって読み取ってください';
+  $('#btn-logout').hidden = !a;
+  const box = $('#login-button');
+  box.hidden = !!a || !configured;
+  if (!a && configured && gisReadyFor === settings.clientId && window.google?.accounts?.id && $('#dlg-settings').open) {
+    box.replaceChildren();
+    window.google.accounts.id.renderButton(box, { type: 'standard', theme: 'filled_blue', size: 'large', text: 'signin_with', shape: 'pill', locale: 'ja' });
+  }
+}
+$('#btn-who').addEventListener('click', openSettings);
+$('#btn-logout').addEventListener('click', () => {
+  try { window.google?.accounts?.id?.disableAutoSelect(); } catch { /* noop */ }
+  clearAuth();
+  toast('ログアウトしました');
+});
+// 期限が切れたら表示を戻す（1分ごとに確認）
+setInterval(() => { if (!currentAuth() && $('#btn-who').textContent !== 'ログイン') renderLogin(); }, 60000);
+
 // ===== 設定済みリンクと QR（ベータ参加用） =====
-// リンクの形：<このページ>#setup=<{u: GAS の URL, t: トークン} の JSON を base64url にしたもの>
-// # 以降はサーバー（GitHub）に送られない。読み取ったらすぐアドレスバーから消す
+// リンクの形：<このページ>#setup=<{u: GAS の URL, c: OAuth クライアント ID} の JSON を base64url にしたもの>
+// 合言葉は入っていない（送信できるかは Google のログインで決まる）。読み取ったらアドレスバーから消す
 const b64url = (str) => btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const unb64url = (s) => atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
 
-function setupLink(gasUrl, token) {
-  return location.origin + location.pathname + '#setup=' + b64url(JSON.stringify({ u: gasUrl, t: token }));
+function setupLink(gasUrl, clientId) {
+  return location.origin + location.pathname + '#setup=' + b64url(JSON.stringify({ u: gasUrl, c: clientId }));
 }
 
-/** ページを設定済みリンクで開いたとき：送信先とトークンを保存する */
+/** ページを設定済みリンクで開いたとき：送信先を保存し、ログインしてもらう */
 function applySetupLink() {
   const m = location.hash.match(/^#setup=([A-Za-z0-9_-]+)$/);
   if (!m) return;
   history.replaceState(null, '', location.pathname + location.search); // アドレスバーと履歴から消す
   let data = null;
   try { data = JSON.parse(unb64url(m[1])); } catch { /* 下で扱う */ }
-  if (!data || !GAS_URL_RE.test(data.u) || typeof data.t !== 'string' || !/^[0-9a-f]{32,128}$/i.test(data.t)) {
+  if (!data || !GAS_URL_RE.test(data.u) || !CLIENT_ID_RE.test(data.c)) {
     toast('設定リンクを読み取れませんでした。リンクが途中で切れていないか確認してください', 6000);
     return;
   }
-  if (settings.gasUrl === data.u && settings.token === data.t) {
+  if (settings.gasUrl === data.u && settings.clientId === data.c) {
     toast('この送信先はすでに設定されています');
   } else {
     if (settings.gasUrl && !confirm('今の送信先の設定を、このリンクの設定で置き換えますか？')) return;
-    saveSettings({ ...settings, gasUrl: data.u, token: data.t });
+    if (settings.clientId !== data.c) clearAuth(); // 別のアプリ向けのログインは使えない
+    saveSettings({ ...settings, gasUrl: data.u, clientId: data.c });
+    initLogin();
     toast('送信先を設定しました', 4000);
   }
-  if (!settings.receiver) {
-    // 受領者氏名だけは各自で入れてもらう
+  if (!currentAuth()) {
     openSettings();
-    setTimeout(() => $('#in-receiver').focus(), 50);
-    toast('受領者氏名（ご自身の名前）を入力して「保存」を押してください', 6000);
+    toast('組織の Google アカウントでログインしてください', 6000);
   }
 }
 
@@ -1343,11 +1475,11 @@ function loadQr() {
 
 $('#btn-share').addEventListener('click', async () => {
   // 保存済みの設定で作る（入力中で未保存の値は使わない）
-  if (!GAS_URL_RE.test(settings.gasUrl) || !settings.token) {
-    toast('先に GAS の URL とトークンを入力して「保存」してください', 5000);
+  if (!GAS_URL_RE.test(settings.gasUrl) || !CLIENT_ID_RE.test(settings.clientId)) {
+    toast('先に GAS の URL と OAuth クライアント ID を入力して「保存」してください', 5000);
     return;
   }
-  const link = setupLink(settings.gasUrl, settings.token);
+  const link = setupLink(settings.gasUrl, settings.clientId);
   try {
     const qrcode = await loadQr();
     const qr = qrcode(0, 'M');
@@ -1371,12 +1503,12 @@ $('#btn-copy-link').addEventListener('click', async () => {
 });
 $('#btn-close-share').addEventListener('click', () => $('#dlg-share').close());
 $('#dlg-share').addEventListener('close', () => {
-  // 合言葉を画面に残さない
   $('#share-qr').replaceChildren();
   $('#share-link').value = '';
 });
 window.addEventListener('hashchange', applySetupLink);
 applySetupLink();
+initLogin();
 
 // ===== 起動 =====
 (async () => {

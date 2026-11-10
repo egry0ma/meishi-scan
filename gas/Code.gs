@@ -6,7 +6,7 @@
  *
  * 既存のプロジェクトに別ファイル（例：meishi.gs）として追加しても動くよう、
  * 中身はすべて MeishiScan の中に閉じ込めている。グローバルに出る名前は
- * setup / rotateToken / doGet / doPost の4つだけ。
+ * setup / doGet / doPost の3つだけ。
  * （同じプロジェクトの .gs ファイルは名前を共有するため、同名の定数はエラーに、
  *   同名の関数は黙って上書きになる）
  *
@@ -14,8 +14,13 @@
  *   A タイムスタンプ / B 連絡先受領者氏名 / C 会社名 / D 氏名 / E 氏名(フリガナ)
  *   F 電話番号 / G Email / H エビデンス（Drive の画像リンク）
  *
+ * 認証：撮影ページで Google アカウントにログインしてもらい、その ID トークン（Google が発行し、
+ * 1時間で切れる）をリクエストに含めてもらう。GAS は Google の tokeninfo で、本物か・このアプリ向け
+ * （CLIENT_ID 宛て）か・許可したドメインやアドレスのアカウントかを確かめる。合言葉は使わない。
+ * B列（連絡先受領者氏名）には、ログインしたアカウントの名前が入る。
+ *
  * doPost の流れ：
- *   トークン照合 → カードIDで重複確認（Drive のファイル名で判定）→ 画像をDriveに保存
+ *   ログインの確認 → カードIDで重複確認（Drive のファイル名で判定）→ 画像をDriveに保存
  *   → LLMで抽出 → シートの末尾に追加
  *
  * 書き込み専用。スプシやDriveの既存データを返す処理は持たない。
@@ -28,14 +33,16 @@
  *   GEMINI_MODEL         任意（既定：gemini-3.6-flash）
  *   GEMINI_THINKING_LEVEL 任意（既定：low。"none" で送らない）
  *   TARGET_SHEET         任意（既定：名簿(AI)）
- *   TOKEN / FOLDER_ID / SHEET_ID  setup() が作成する
+ *   CLIENT_ID            必須。Google Cloud で作った OAuth クライアント ID（…apps.googleusercontent.com）
+ *   ALLOWED_DOMAIN       送信を許可する Google Workspace のドメイン（例：origami-vol.or.jp）。
+ *                        setup() が、実行した人のアドレスのドメインで作る（gmail.com の場合は作らない）
+ *   ALLOWED_EMAILS       任意。ドメインに関係なく許可するアドレス（カンマ区切り）
+ *   FOLDER_ID / SHEET_ID setup() が作成する
+ *   ※ ALLOWED_DOMAIN と ALLOWED_EMAILS のどちらも無いときは、だれの送信も受け付けない
  */
 
 /** 初回に1回だけエディタから実行する（詳細は MeishiScan 内の setup_ を参照） */
 function setup() { return MeishiScan.setup(); }
-
-/** トークンを作り直す（漏れた疑いがあるとき） */
-function rotateToken() { return MeishiScan.rotateToken(); }
 
 function doGet(e) { return MeishiScan.doGet(e); }
 
@@ -79,7 +86,7 @@ const MeishiScan = (function () {
 
   /**
    * 初回に1回だけエディタから実行する。
-   * TOKEN / FOLDER_ID / SHEET_ID を作り、書き込み先シートの見出しを確認する。
+   * FOLDER_ID / SHEET_ID / ALLOWED_DOMAIN を作り、書き込み先シートの見出しを確認する。
    * 既に値がある項目は上書きしない（何度実行しても安全）。
    */
   function setup_() {
@@ -105,27 +112,26 @@ const MeishiScan = (function () {
       const folder = DriveApp.createFolder('名刺スキャン画像');
       props.setProperty('FOLDER_ID', folder.getId());
     }
-    if (!props.getProperty('TOKEN')) {
-      props.setProperty('TOKEN', newToken_());
-    }
     if (!props.getProperty('PROVIDER')) {
       props.setProperty('PROVIDER', 'claude');
     }
+    // 送信を許可するドメイン：実行した人（＝管理者）のアドレスのドメイン
+    if (!props.getProperty('ALLOWED_DOMAIN') && !props.getProperty('ALLOWED_EMAILS')) {
+      const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+      const domain = me.split('@')[1] || '';
+      if (domain && domain !== 'gmail.com' && domain !== 'googlemail.com') {
+        props.setProperty('ALLOWED_DOMAIN', domain);
+      } else if (me) {
+        props.setProperty('ALLOWED_EMAILS', me);
+      }
+    }
 
     Logger.log('セットアップ完了（書き込み先：' + targetSheetName_() + '）');
-    Logger.log('TOKEN: ' + props.getProperty('TOKEN'));
-    Logger.log('このトークンを撮影ページの「設定」に入力してください。');
-  }
-
-  /** トークンを作り直す（漏れた疑いがあるとき）。撮影ページの設定も更新すること。 */
-  function rotateToken_() {
-    const token = newToken_();
-    PropertiesService.getScriptProperties().setProperty('TOKEN', token);
-    Logger.log('新しい TOKEN: ' + token);
-  }
-
-  function newToken_() {
-    return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+    Logger.log('送信を許可：' + (props.getProperty('ALLOWED_DOMAIN') ? 'ドメイン ' + props.getProperty('ALLOWED_DOMAIN') : '') +
+      (props.getProperty('ALLOWED_EMAILS') ? ' アドレス ' + props.getProperty('ALLOWED_EMAILS') : ''));
+    if (!props.getProperty('CLIENT_ID')) {
+      Logger.log('スクリプトプロパティ CLIENT_ID に、Google Cloud で作った OAuth クライアント ID を設定してください。');
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -144,21 +150,20 @@ const MeishiScan = (function () {
       const req = parseRequest_(e);
       const props = PropertiesService.getScriptProperties();
 
-      const token = props.getProperty('TOKEN');
-      if (!token) return json_({ ok: false, error: 'not_configured' });
-      if (!safeEqual_(String(req.token || ''), token)) {
-        return json_({ ok: false, error: 'unauthorized' });
-      }
+      // ログインの確認（Google の ID トークン）
+      const auth = authenticate_(req.idToken, props);
+      if (!auth.ok) return json_({ ok: false, error: auth.error });
+      const user = auth.user;
 
-      // 接続テスト（トークンの確認だけ。LLMは呼ばない）
-      if (req.action === 'ping') return json_({ ok: true, pong: true });
+      // 接続テスト（ログインの確認だけ。LLMは呼ばない）
+      if (req.action === 'ping') return json_({ ok: true, pong: true, name: user.name });
 
       const cardId = String(req.cardId || '');
       if (!/^[A-Za-z0-9-]{8,64}$/.test(cardId)) {
         return json_({ ok: false, error: 'bad_card_id' });
       }
-      const receiver = clean_(String(req.receiver || '').slice(0, 50));
-      if (!receiver) return json_({ ok: false, error: 'no_receiver' });
+      // B列には、ログインしたアカウントの名前を入れる（ページから送られた名前は使わない）
+      const receiver = clean_(String(user.name).slice(0, 50));
       const mimeType = req.mimeType === 'image/png' ? 'image/png' : 'image/jpeg';
       const imageB64 = String(req.image || '');
       if (!imageB64 || imageB64.length > MAX_IMAGE_B64_LENGTH) {
@@ -228,12 +233,43 @@ const MeishiScan = (function () {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  /** 長さと内容を一定時間で比較する */
-  function safeEqual_(a, b) {
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    return diff === 0;
+  /**
+   * Google の ID トークンを確かめる。{ ok: true, user: { email, name } } か { ok: false, error } を返す。
+   *  - login_required：トークンが無い、偽物、期限切れ、このアプリ向けでない
+   *  - not_allowed：本物だが、許可したドメイン・アドレスのアカウントではない
+   *  - not_configured：CLIENT_ID か、許可するドメイン・アドレスが未設定
+   * 確かめた結果は、トークンの有効期限まで（最大50分）キャッシュする。
+   */
+  function authenticate_(idToken, props) {
+    const clientId = props.getProperty('CLIENT_ID');
+    const allowedDomain = String(props.getProperty('ALLOWED_DOMAIN') || '').trim().toLowerCase();
+    const allowedEmails = String(props.getProperty('ALLOWED_EMAILS') || '').toLowerCase()
+      .split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x; });
+    if (!clientId || (!allowedDomain && !allowedEmails.length)) return { ok: false, error: 'not_configured' };
+    idToken = String(idToken || '');
+    if (!idToken || idToken.length > 4096 || !/^[A-Za-z0-9_\-.]+$/.test(idToken)) return { ok: false, error: 'login_required' };
+
+    const cache = CacheService.getScriptCache();
+    const key = 'idt:' + Utilities.base64EncodeWebSafe(
+      Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken)).slice(0, 43);
+    const hit = cache.get(key);
+    let info = hit ? JSON.parse(hit) : null;
+    if (!info) {
+      const res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken),
+        { muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) return { ok: false, error: 'login_required' };
+      info = JSON.parse(res.getContentText());
+    }
+    const now = Date.now() / 1000;
+    if (info.aud !== clientId) return { ok: false, error: 'login_required' };
+    if (info.iss !== 'accounts.google.com' && info.iss !== 'https://accounts.google.com') return { ok: false, error: 'login_required' };
+    if (!(Number(info.exp) > now)) return { ok: false, error: 'login_required' };
+    if (String(info.email_verified) !== 'true') return { ok: false, error: 'not_allowed' };
+    const email = String(info.email || '').toLowerCase();
+    const domainOk = allowedDomain && String(info.hd || '').toLowerCase() === allowedDomain;
+    if (!domainOk && allowedEmails.indexOf(email) < 0) return { ok: false, error: 'not_allowed' };
+    if (!hit) cache.put(key, JSON.stringify(info), Math.max(1, Math.min(3000, Math.floor(Number(info.exp) - now))));
+    return { ok: true, user: { email: email, name: String(info.name || email) } };
   }
 
   function parseDate_(s) {
@@ -500,5 +536,5 @@ const MeishiScan = (function () {
     }
   }
 
-  return { setup: setup_, rotateToken: rotateToken_, doGet: doGet_, doPost: doPost_ };
+  return { setup: setup_, doGet: doGet_, doPost: doPost_ };
 })();
