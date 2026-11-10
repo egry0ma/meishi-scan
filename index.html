@@ -177,7 +177,8 @@ const CLIP_LEVEL = 250;      // これ以上の明るさを「真っ白（白飛
 const GLARE_MIN = 0.008;     // 名刺の内側で真っ白な画素がこの割合以上あり、かつ…
 const PAPER_MAX = 235;       // …紙の地の色（明るさの中央値）がこれ未満なら「反射あり」。
                              // 地の色自体がこれ以上明るい白い名刺は、反射と紙の白さを見分けられないので止めない
-// 反射があるときの2枚合成
+// 反射があるときの2枚合成。実物では2枚の位置合わせの精度が足りず文字が二重になったため、止めている
+const GLARE_FUSION = false;
 const GLARE_MASK_SIZE = 64;    // 反射の位置を比べるための、名刺を正規化した小さな画像の一辺(px)
 const GLARE_TILT = 0.04;       // 1枚目のあと、角がこの量（名刺の対角線比）以上動いたら「傾けた」とみなす
 const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目でも反射している割合がこれ以下なら2枚目を撮る
@@ -842,10 +843,12 @@ function onDetect(r, now) {
   }
 
   const glare = hasGlare(r);
-  if (stableFor < STABLE_MS) { setStatus(glare ? '反射があります。静止すると2枚撮って反射を消します' : '静止してください'); return; }
+  const GLARE_TIP = '反射があります。角度を少し変えると文字が読みやすくなります';
+  if (stableFor < STABLE_MS) { setStatus(glare ? (GLARE_FUSION ? '反射があります。静止すると2枚撮って反射を消します' : GLARE_TIP) : '静止してください'); return; }
   if (!sharpEnough(r)) { setStatus('ピント合わせ中…'); return; }
-  if (!settings.auto) { setStatus(glare ? '反射があります（手動撮影で撮れます）' : '撮影できます（手動撮影）'); return; }
-  if (glare) captureGlareFirst(r.quad, r.scale, r.mask);
+  if (!settings.auto) { setStatus(glare ? GLARE_TIP + '（手動撮影）' : '撮影できます（手動撮影）'); return; }
+  // 反射があっても止めずに撮る（2枚合成が有効なときだけ、1枚目として待つ）
+  if (glare && GLARE_FUSION) captureGlareFirst(r.quad, r.scale, r.mask);
   else capture(r.quad, r.scale);
 }
 
