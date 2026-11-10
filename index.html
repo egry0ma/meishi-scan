@@ -276,15 +276,17 @@ function loadOpenCv() {
     document.head.append(s);
   });
 }
-// window.cv は独自の then を持つ Emscripten の Module で、await すると初期化後に無限ループになる。
-// そのため await せず、Mat が使えるようになるまでポーリングする。
+// window.cv は独自の then を持つ Emscripten の Module。then が Module 自身を渡し返すため、
+// await したり、Promise の解決値（async 関数の return 値や resolve() の引数）にしたりすると
+// then が無限に呼ばれ続けてページが固まる。
+// そのため await せずにポーリングし、返すときは { cv } で包んで then を持たない値にする。
 async function waitCvRuntime() {
   const deadline = Date.now() + 60000;
   for (;;) {
     let c = window.cv;
     if (c instanceof Promise) { c = await c; } // 将来のビルドで本物の Promise になった場合
     if (c && typeof c.Mat === 'function') {
-      try { new c.Mat().delete(); return c; } catch { /* まだ初期化中 */ }
+      try { new c.Mat().delete(); return { cv: c }; } catch { /* まだ初期化中 */ }
     }
     if (Date.now() > deadline) throw new Error('OpenCV.js の初期化がタイムアウトしました');
     await sleep(100);
@@ -815,8 +817,8 @@ window.addEventListener('beforeunload', (e) => {
   renderTray();
 })();
 
-loadOpenCv().then((c) => {
-  cv = c;
+loadOpenCv().then((loaded) => {
+  cv = loaded.cv;
   state.kernel = cv.Mat.ones(3, 3, cv.CV_8U); // 使い回すのでページが開いている間は保持
   $('#btn-shot').disabled = !state.running;
   setStatus(state.running ? '名刺をかざしてください' : '準備完了');
