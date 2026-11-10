@@ -34,6 +34,9 @@
   .stage video, .stage canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   .stage .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
     text-align: center; padding: 16px; font-size: 14px; }
+  .debug { position: absolute; left: 8px; right: 8px; top: 46px; background: rgba(0,0,0,.7); color: #f2f2f2;
+    font: 11px/1.5 ui-monospace, Menlo, monospace; padding: 6px 8px; border-radius: 8px; white-space: pre-wrap;
+    pointer-events: none; }
   .status { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(0,0,0,.6);
     padding: 6px 12px; border-radius: 999px; font-size: 14px; white-space: nowrap; max-width: calc(100% - 20px);
     overflow: hidden; text-overflow: ellipsis; }
@@ -84,6 +87,7 @@
   <canvas id="overlay" class="overlay"></canvas>
   <div class="placeholder" id="placeholder">「カメラ開始」を押して、名刺をカメラにかざしてください。<br>四角形を検出し、静止してピントが合うと自動で撮影します。</div>
   <div class="status" id="status">OpenCV 読み込み中…</div>
+  <div class="debug" id="debug" hidden></div>
   <div class="meter" id="meter" hidden><div></div></div>
   <div class="flash" id="flash"></div>
 </div>
@@ -111,6 +115,7 @@
     <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
     <p class="hint">静止中にいちばんピントが合った状態に近づいたら撮影します。これより低い値のときは、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
     <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
+    <label class="check"><input id="in-debug" type="checkbox"> 判定の詳細を表示する（撮れないときの原因調べ用）</label>
     <div class="row">
       <button type="button" id="btn-ping">接続テスト</button>
     </div>
@@ -151,12 +156,14 @@ const PAPER_MAX = 235;       // …紙の地の色（明るさの中央値）が
                              // 地の色自体がこれ以上明るい白い名刺は、反射と紙の白さを見分けられないので止めない
 // 反射があるときの2枚合成
 const GLARE_MASK_SIZE = 64;    // 反射の位置を比べるための、名刺を正規化した小さな画像の一辺(px)
-const GLARE_TILT = 0.02;       // 1枚目のあと、角がこの量（対角線比）以上動いたら「傾けた」とみなす
+const GLARE_TILT = 0.04;       // 1枚目のあと、角がこの量（名刺の対角線比）以上動いたら「傾けた」とみなす
 const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目でも反射している割合がこれ以下なら2枚目を撮る
 const GLARE_WAIT_MS = 10000;   // 2枚目をこの時間待っても撮れなければ、1枚目だけで保存する
 const GLARE_LOST_MS = 1500;    // 1枚目のあと名刺がこの時間見えなければ、1枚目だけで保存する
 const FUSE_LEVEL = 240;        // 合成時に「反射」として置き換える明るさ
-const STABLE_TOL = 0.012;    // 静止とみなす角の移動量（対角線比）
+// 静止とみなす角の移動量（名刺の対角線比）。画面ではなく名刺の大きさを基準にするので、
+// 近づいて手ぶれが画面上で大きく見えても、判定の厳しさが変わらない
+const STABLE_TOL = 0.025;
 const STABLE_MS = 600;       // この時間静止したら撮影候補
 const REARM_MS = 400;        // 名刺が見えなくなってからこの時間で次の撮影を許可
 const OUT_MAX = 1600;        // 保存画像の長辺(px)
@@ -184,7 +191,7 @@ const state = {
 
 // ===== 設定 =====
 // minSharp はピントの下限（以前の sharp は意味が変わったので引き継がない）
-const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 10, auto: true };
+const DEFAULT_SETTINGS = { gasUrl: '', token: '', receiver: '', minSharp: 10, auto: true, debug: false };
 function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_SETTINGS }; }
@@ -460,10 +467,17 @@ function detect() {
 
     const frameArea = pw * ph;
     let best = null, bestArea = 0;
+    // 判定の詳細表示用：画面の縦か横にいちばん広がっている輪郭（閉じていない線は面積が 0 になるので、面積では選ばない）
+    let largest = null, largestSpan = 0;
     const n = contours.size();
     for (let i = 0; i < n; i++) {
       const c = keep(contours.get(i)); // get() も新しい Mat を返すので delete が必要
       const area = cv.contourArea(c);
+      if (settings.debug) {
+        const rc = cv.boundingRect(c);
+        const span = Math.max(rc.width / pw, rc.height / ph);
+        if (span > largestSpan) { largestSpan = span; largest = c; }
+      }
       if (area < frameArea * MIN_AREA || area > frameArea * 0.98 || area <= bestArea) continue;
       const approx = keep(new cv.Mat());
       cv.approxPolyDP(c, approx, 0.02 * cv.arcLength(c, true), true);
@@ -478,7 +492,21 @@ function detect() {
       if (ratio > 2.5) continue;
       best = q; bestArea = area;
     }
-    if (!best) return { quad: null, scale, pw, ph };
+    if (!best) {
+      // 判定の詳細表示用：いちばん大きい輪郭が四角形にならなかった理由の手がかり
+      let largestInfo = null;
+      if (settings.debug && largest && largestSpan >= 0.2) {
+        const ap = keep(new cv.Mat());
+        cv.approxPolyDP(largest, ap, 0.02 * cv.arcLength(largest, true), true);
+        const rc = cv.boundingRect(largest);
+        largestInfo = {
+          span: largestSpan,
+          vertices: ap.rows,
+          touches: rc.x <= 2 || rc.y <= 2 || rc.x + rc.width >= pw - 2 || rc.y + rc.height >= ph - 2,
+        };
+      }
+      return { quad: null, scale, pw, ph, largest: largestInfo };
+    }
 
     const xs = best.map((p) => p.x), ys = best.map((p) => p.y);
     let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
@@ -598,6 +626,43 @@ function glareOverlap(maskA, maskB) {
 
 const TILT_MSG = '反射を消すため、名刺を少し傾けてください（もう1枚撮ります）';
 
+/** 判定の詳細表示（設定でオンのときだけ）。どの条件で止まっているかを画面に出す */
+let debugShownAt = 0;
+function showDebug(r, m, now) {
+  const el = $('#debug');
+  if (!settings.debug) { if (!el.hidden) el.hidden = true; return; }
+  if (now - debugShownAt < 200) return; // 書き換えすぎると読めないので 0.2 秒ごと
+  debugShownAt = now;
+  const ok = (b) => (b ? '○' : '✕');
+  const pct = (v) => (v * 100).toFixed(1) + '%';
+  const lines = [];
+  if (!r.quad) {
+    lines.push('四角形: ✕ 見つからない');
+    const L = r.largest;
+    if (L) {
+      lines.push(`  最大の輪郭: 画面の ${pct(L.span)} に広がる / 頂点 ${L.vertices}（4 で四角形）`);
+      if (L.touches) lines.push('  → 画面の縁に接しています。名刺全体を画面に入れてください');
+      else if (L.vertices > 4) lines.push('  → 縁の一部が欠けています（反射・影・指・背景との色の差）');
+    } else {
+      lines.push('  輪郭なし（背景との色の差が小さい、またはぼけている）');
+    }
+  } else {
+    const g = state.glare;
+    lines.push('四角形: ○');
+    lines.push(`大きさ: ${pct(r.fill)}（${pct(MIN_FILL)} 以上）${ok(r.fill >= MIN_FILL)}`);
+    const moveText = Number.isFinite(m.move) ? pct(m.move) : '—';
+    lines.push(`静止: ${Math.min(STABLE_MS, Math.round(m.stableFor))} / ${STABLE_MS}ms（動き ${moveText}・${pct(STABLE_TOL)} 以下）${ok(m.stableFor >= STABLE_MS)}`);
+    lines.push(`ピント: ${Math.round(r.sharp)}（最高 ${Math.round(state.peak)} の ${PEAK_RATIO * 100}% 以上・下限 ${settings.minSharp}）${ok(sharpEnough(r))}`);
+    lines.push(`反射: 白飛び ${pct(r.clipped)}・紙の明るさ ${r.paper}（${pct(GLARE_MIN)} 以上かつ ${PAPER_MAX} 未満で反射）${hasGlare(r) ? '反射あり' : 'なし'}`);
+    if (g) lines.push(`2枚目待ち: 傾け ${ok(g.moved)} / 反射の重なり ${pct(glareOverlap(g.mask, r.mask))}（${pct(GLARE_OVERLAP_MAX)} 以下）${ok(glareOverlap(g.mask, r.mask) <= GLARE_OVERLAP_MAX)}`);
+    if (!state.armed) lines.push('撮影済み: 名刺を画面から外すと次を撮れます');
+  }
+  const ex = state.exposure;
+  lines.push(`露出補正: ${ex.supported ? '対応（' + ex.value.toFixed(2) + '）' : '非対応'}`);
+  el.textContent = lines.join('\n');
+  el.hidden = false;
+}
+
 function onDetect(r, now) {
   const g = state.glare;
   if (g && now - g.at > GLARE_WAIT_MS) { finishGlareAlone('2枚目が撮れなかったため、反射が残ったまま保存しました'); return; }
@@ -607,23 +672,27 @@ function onDetect(r, now) {
     if (g && now - state.lostSince > GLARE_LOST_MS) { finishGlareAlone('名刺が外れたため、反射が残ったまま保存しました'); return; }
     if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
     updateMeter(0);
+    showDebug(r, null, now);
     setStatus(g ? TILT_MSG : state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
     return;
   }
   state.lostSince = 0;
   autoExposure(r, now);
-  const diag = Math.hypot(r.pw, r.ph);
-  const move = state.prev ? Math.max(...r.quad.map((p, i) => dist(p, state.prev[i]))) / diag : Infinity;
-  state.prev = r.quad;
+  // 角の移動量は名刺の対角線（2本の平均）を基準にする
+  const q = r.quad;
+  const cardDiag = Math.max(1, (dist(q[0], q[2]) + dist(q[1], q[3])) / 2);
+  const move = state.prev ? Math.max(...q.map((p, i) => dist(p, state.prev[i]))) / cardDiag : Infinity;
+  state.prev = q;
   // 動いたら静止の計測とピントの最高値をやり直す
   if (move > STABLE_TOL) { state.stableSince = now; state.peak = 0; }
   if (g && move > GLARE_TILT) g.moved = true;
   state.peak = Math.max(state.peak, r.sharp);
   updateMeter(r.sharp);
+  const stableFor = now - state.stableSince;
+  showDebug(r, { move, stableFor }, now);
 
   if (!state.armed) { setStatus('撮影済み — 次の名刺に替えてください'); return; }
   if (r.fill < MIN_FILL) { setStatus('もう少し近づけてください'); return; }
-  const stableFor = now - state.stableSince;
 
   // 反射ありで1枚目を撮ったあと：傾けて反射の位置がずれたら2枚目を撮って合成する
   if (g) {
@@ -983,6 +1052,7 @@ function openSettings() {
   $('#in-receiver').value = settings.receiver;
   $('#in-sharp').value = settings.minSharp;
   $('#in-auto').checked = settings.auto;
+  $('#in-debug').checked = settings.debug;
   dlg.showModal();
 }
 function readSettingsForm() {
@@ -993,6 +1063,7 @@ function readSettingsForm() {
     receiver: $('#in-receiver').value.trim(),
     minSharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.minSharp,
     auto: $('#in-auto').checked,
+    debug: $('#in-debug').checked,
   };
 }
 $('#btn-settings').addEventListener('click', openSettings);
