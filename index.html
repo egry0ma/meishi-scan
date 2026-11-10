@@ -1346,16 +1346,24 @@ async function checkRole() {
   if (!a || !GAS_URL_RE.test(settings.gasUrl)) return;
   try {
     const data = await postToGas({ action: 'ping', idToken: a.credential });
-    // 古い版の GAS は admin を返さない。そのときは確かめられなかったものとして欄を出したままにする
-    if (data.ok) role = { checked: 'admin' in data, admin: !!data.admin };
+    if (data.ok) role = { checked: true, admin: data.admin === true };
     else if (data.error === 'login_required') clearAuth();
-  } catch { /* 問い合わせられないときは、直せるよう欄を出したままにする */ }
+  } catch { /* 問い合わせられないときは欄を出さない（直すときは #admin で開く） */ }
   renderLogin();
 }
-/** 送信先が未設定、または GAS で管理者か確かめられていないときは出す。参加者と確かめられたら出さない */
+// ページを <URL>#admin で開いたときは、確かめられなくても欄を出す（送信先の設定を間違えたときの直し口）
+let forceAdmin = false;
+if (location.hash === '#admin') {
+  forceAdmin = true;
+  history.replaceState(null, '', location.pathname + location.search);
+}
+/**
+ * 「管理者向け」の欄を出すのは、送信先がまだ未設定のとき（管理者が最初に設定する）か、
+ * GAS で管理者だと確かめられたときだけ。ログイン前・確認中・確認に失敗したときは出さない。
+ */
 function showAdmin() {
   const configured = GAS_URL_RE.test(settings.gasUrl) && CLIENT_ID_RE.test(settings.clientId);
-  return !configured || !role.checked || role.admin;
+  return !configured || role.admin || forceAdmin;
 }
 function onCredential(resp) {
   try {
