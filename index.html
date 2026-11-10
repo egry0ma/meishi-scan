@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>名刺スキャン</title>
+<style>
+  :root {
+    --bg: #111;
+    --panel: #1c1c1e;
+    --text: #f2f2f2;
+    --muted: #9a9a9f;
+    --accent: #2f9e6b;
+    --warn: #e0a321;
+    --err: #e5484d;
+    --line: #333;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  body { display: flex; flex-direction: column; min-height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  button { font: inherit; color: var(--text); background: #2c2c2e; border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button.danger { background: var(--err); border-color: var(--err); }
+  .stage { position: relative; flex: 1; min-height: 240px; background: #000; overflow: hidden; }
+  .stage video, .stage canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .stage .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
+    text-align: center; padding: 16px; font-size: 14px; }
+  .status { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(0,0,0,.6);
+    padding: 6px 12px; border-radius: 999px; font-size: 14px; white-space: nowrap; max-width: calc(100% - 20px);
+    overflow: hidden; text-overflow: ellipsis; }
+  .meter { position: absolute; left: 12px; right: 12px; bottom: 10px; height: 6px; background: rgba(255,255,255,.2);
+    border-radius: 3px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--warn); transition: width .1s; }
+  .meter.ok > div { background: var(--accent); }
+  .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .flash.on { opacity: .8; transition: none; }
+  .controls { display: flex; gap: 8px; padding: 10px 12px; }
+  .controls button { flex: 1; padding: 14px 8px; font-size: 15px; }
+  .tray { display: flex; gap: 8px; overflow-x: auto; padding: 0 12px 12px; min-height: 92px; }
+  .tray:empty::before { content: "未送信の名刺はありません"; color: var(--muted); font-size: 13px; padding: 8px 0; }
+  .thumb { position: relative; flex: 0 0 auto; width: 120px; height: 80px; border-radius: 8px; overflow: hidden;
+    border: 2px solid var(--line); padding: 0; background: #000; }
+  .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .thumb .badge { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; padding: 2px 4px;
+    background: rgba(0,0,0,.65); text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .thumb.sending { border-color: var(--warn); }
+  .thumb.error { border-color: var(--err); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px;
+    width: min(520px, calc(100vw - 32px)); padding: 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h2 { font-size: 16px; margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input[type=url], input[type=password], input[type=text], input[type=number] {
+    width: 100%; font: inherit; font-size: 16px; /* 16px 未満だと iOS がズームする */
+    color: var(--text); background: #111; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .row button { flex: 1; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--text); }
+  .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
+  #preview-img { width: 100%; max-height: 60vh; object-fit: contain; background: #000; border-radius: 8px; }
+  .toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    background: #333; color: #fff; padding: 10px 14px; border-radius: 10px; font-size: 14px; max-width: calc(100vw - 32px);
+    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 10; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>名刺スキャン</h1>
+  <button id="btn-settings" type="button">設定</button>
+</header>
+
+<div class="stage" id="stage">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="overlay" class="overlay"></canvas>
+  <div class="placeholder" id="placeholder">「カメラ開始」を押して、名刺をカメラにかざしてください。<br>四角形を検出し、静止してピントが合うと自動で撮影します。</div>
+  <div class="status" id="status">OpenCV 読み込み中…</div>
+  <div class="meter" id="meter" hidden><div></div></div>
+  <div class="flash" id="flash"></div>
+</div>
+
+<div class="controls">
+  <button id="btn-camera" type="button" class="primary">カメラ開始</button>
+  <button id="btn-shot" type="button" disabled>手動撮影</button>
+  <button id="btn-send" type="button" disabled>送信</button>
+</div>
+<div class="tray" id="tray"></div>
+
+<dialog id="dlg-settings">
+  <form method="dialog" id="form-settings">
+    <h2>設定</h2>
+    <label for="in-url">GAS ウェブアプリの URL（/exec で終わるもの）</label>
+    <input id="in-url" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+      placeholder="https://script.google.com/macros/s/…/exec">
+    <label for="in-token">トークン（setup() で作られた TOKEN）</label>
+    <input id="in-token" type="password" autocomplete="off" spellcheck="false">
+    <p class="hint">URL とトークンはこの端末のブラウザ（localStorage）にだけ保存されます。</p>
+    <label for="in-sharp">ピントのしきい値（撮影中の画面下のバーに現在値が出ます）</label>
+    <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
+    <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
+    <div class="row">
+      <button type="button" id="btn-ping">接続テスト</button>
+    </div>
+    <div class="row">
+      <button value="cancel" type="submit">閉じる</button>
+      <button value="save" type="submit" class="primary" id="btn-save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-preview">
+  <img id="preview-img" alt="撮影した名刺">
+  <p class="hint" id="preview-info"></p>
+  <div class="row">
+    <button type="button" class="danger" id="btn-delete">削除</button>
+    <button type="button" id="btn-close-preview">閉じる</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<canvas id="proc" hidden></canvas>
+<canvas id="full" hidden></canvas>
+<canvas id="out" hidden></canvas>
+
+<script type="module">
+// ===== 定数 =====
+const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
+const OPENCV_SRI = 'sha384-XsTfGA62I8LzqS3D7IcgiSOCrJuECWLcg4s1M0AnrkDCcJ8lXX+j+qdg+o6t7KZa';
+const PROC_MAX = 640;        // 検出用に縮小する長辺(px)
+const DETECT_INTERVAL = 100; // 検出の間隔(ms)
+const MIN_AREA = 0.12;       // 画面に対する四角形の最小面積比
+const STABLE_TOL = 0.012;    // 静止とみなす角の移動量（対角線比）
+const STABLE_MS = 600;       // この時間静止したら撮影候補
+const REARM_MS = 400;        // 名刺が見えなくなってからこの時間で次の撮影を許可
+const OUT_MAX = 1600;        // 保存画像の長辺(px)
+const JPEG_QUALITY = 0.88;
+const CONCURRENCY = 3;       // 同時送信数
+const SEND_TIMEOUT = 180000; // 1件あたりのタイムアウト(ms)
+const SETTINGS_KEY = 'meishi-scan.settings.v1';
+const DB_NAME = 'meishi-scan';
+const STORE = 'cards';
+
+const $ = (s) => document.querySelector(s);
+const video = $('#video'), overlay = $('#overlay'), statusEl = $('#status'), meter = $('#meter');
+const procCanvas = $('#proc'), fullCanvas = $('#full'), outCanvas = $('#out');
+const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+const overlayCtx = overlay.getContext('2d');
+
+let cv = null;
+const state = {
+  stream: null, running: false, wantRunning: false, loopId: 0, lastTick: 0,
+  kernel: null, prev: null, stableSince: 0, lostSince: 0, armed: true,
+  capturing: false, last: null, items: [], sending: false, wakeLock: null,
+};
+
+// ===== 設定 =====
+const DEFAULT_SETTINGS = { gasUrl: '', token: '', sharp: 60, auto: true };
+function loadSettings() {
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
+  catch { return { ...DEFAULT_SETTINGS }; }
+}
+let settings = loadSettings();
+function saveSettings(s) {
+  settings = s;
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+  catch { toast('設定を保存できませんでした（プライベートブラウズでは保存されない場合があります）'); }
+}
+
+// ===== UI 補助 =====
+let toastTimer = 0;
+function toast(msg, ms = 3000) {
+  const el = $('#toast');
+  el.textContent = msg; el.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), ms);
+}
+function setStatus(msg) { if (statusEl.textContent !== msg) statusEl.textContent = msg; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ===== IndexedDB（未送信の名刺を保存） =====
+let dbPromise = null;
+function openDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
+    req.onsuccess = () => {
+      const db = req.result;
+      // iOS Safari はバックグラウンド復帰時に接続が切れることがあるので、次回は開き直す
+      db.onclose = () => { dbPromise = null; };
+      db.onversionchange = () => { db.close(); dbPromise = null; };
+      resolve(db);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
+    req.onblocked = () => toast('別のタブでこのページを閉じてください');
+  });
+  return dbPromise;
+}
+async function dbRun(mode, fn, retry = true) {
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      const req = fn(tx.objectStore(STORE));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+    });
+  } catch (e) {
+    if (!retry) throw e;
+    dbPromise = null; // 接続切れの可能性があるので1回だけ開き直して再試行
+    return dbRun(mode, fn, false);
+  }
+}
+const dbPut = (rec) => dbRun('readwrite', (s) => s.put(rec));
+const dbGet = (id) => dbRun('readonly', (s) => s.get(id));
+const dbDelete = (id) => dbRun('readwrite', (s) => s.delete(id));
+const dbAll = () => dbRun('readonly', (s) => s.getAll());
+
+// ===== 一覧 =====
+function addItem(rec) {
+  // 画像データ本体はメモリに持たず、サムネイルだけ表示用に保持する
+  const thumbUrl = URL.createObjectURL(new Blob([rec.thumb], { type: 'image/jpeg' }));
+  state.items.push({ id: rec.id, createdAt: rec.createdAt, status: 'pending', error: '', thumbUrl });
+}
+function removeItem(id) {
+  const i = state.items.findIndex((x) => x.id === id);
+  if (i >= 0) { URL.revokeObjectURL(state.items[i].thumbUrl); state.items.splice(i, 1); }
+}
+function renderTray() {
+  const tray = $('#tray');
+  const existing = new Map([...tray.children].map((el) => [el.dataset.id, el]));
+  for (const it of state.items) {
+    let el = existing.get(it.id);
+    if (!el) {
+      el = document.createElement('button');
+      el.type = 'button'; el.className = 'thumb'; el.dataset.id = it.id;
+      const img = document.createElement('img'); img.src = it.thumbUrl; img.alt = '';
+      const badge = document.createElement('div'); badge.className = 'badge';
+      el.append(img, badge);
+      el.addEventListener('click', () => openPreview(it.id));
+      tray.append(el);
+    }
+    existing.delete(it.id);
+    el.className = 'thumb ' + it.status;
+    el.querySelector('.badge').textContent =
+      it.status === 'sending' ? '送信中…' : it.status === 'error' ? '失敗: ' + it.error : '未送信';
+    el.title = it.error || '';
+  }
+  for (const el of existing.values()) el.remove();
+  const n = state.items.length;
+  const btn = $('#btn-send');
+  btn.textContent = state.sending ? '送信中…' : n ? `送信（${n}件）` : '送信';
+  btn.disabled = state.sending || n === 0;
+}
+
+// ===== OpenCV.js の読み込み =====
+function loadOpenCv() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = OPENCV_URL;
+    s.integrity = OPENCV_SRI;
+    s.crossOrigin = 'anonymous';
+    s.async = true;
+    s.onload = () => waitCvRuntime().then(resolve, reject);
+    s.onerror = () => reject(new Error('OpenCV.js を読み込めませんでした'));
+    document.head.append(s);
+  });
+}
+// window.cv は独自の then を持つ Emscripten の Module で、await すると初期化後に無限ループになる。
+// そのため await せず、Mat が使えるようになるまでポーリングする。
+async function waitCvRuntime() {
+  const deadline = Date.now() + 60000;
+  for (;;) {
+    let c = window.cv;
+    if (c instanceof Promise) { c = await c; } // 将来のビルドで本物の Promise になった場合
+    if (c && typeof c.Mat === 'function') {
+      try { new c.Mat().delete(); return c; } catch { /* まだ初期化中 */ }
+    }
+    if (Date.now() > deadline) throw new Error('OpenCV.js の初期化がタイムアウトしました');
+    await sleep(100);
+  }
+}
+
+// ===== カメラ =====
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast('このブラウザではカメラを使えません（HTTPS で開いているか確認してください）', 5000);
+    return;
+  }
+  state.wantRunning = true;
+  $('#btn-camera').disabled = true;
+  try {
+    let stream;
+    try {
+      // exact を使うと iOS で OverconstrainedError になりやすいので ideal で指定する
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      });
+    } catch (e) {
+      if (e && (e.name === 'OverconstrainedError' || e.name === 'ConstraintNotSatisfiedError')) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } });
+      } else { throw e; }
+    }
+    state.stream = stream;
+    video.muted = true;
+    video.setAttribute('playsinline', ''); // iOS でフルスクリーン再生にしない
+    video.srcObject = stream;
+    await video.play();
+
+    const track = stream.getVideoTracks()[0];
+    track.addEventListener('ended', () => { if (state.running) stopCamera(false); });
+    try {
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.focusMode && caps.focusMode.includes('continuous')) {
+        await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+      }
+    } catch { /* 対応していない端末は無視 */ }
+
+    try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* 任意 */ }
+
+    state.running = true;
+    state.prev = null; state.stableSince = 0; state.lostSince = 0; state.armed = true;
+    $('#placeholder').hidden = true;
+    $('#btn-camera').textContent = 'カメラ停止';
+    $('#btn-camera').classList.remove('primary');
+    $('#btn-shot').disabled = !cv;
+    meter.hidden = false;
+    loop();
+  } catch (e) {
+    state.wantRunning = false;
+    const name = e && e.name;
+    const msg = name === 'NotAllowedError'
+      ? 'カメラの使用が許可されていません。ブラウザやOSの設定でカメラを許可してください。'
+      : name === 'NotFoundError' ? 'カメラが見つかりません。'
+      : name === 'NotReadableError' ? '他のアプリがカメラを使用中です。'
+      : 'カメラを開始できませんでした: ' + (e && e.message || e);
+    toast(msg, 6000);
+  } finally {
+    $('#btn-camera').disabled = false;
+  }
+}
+
+function stopCamera(userAction = true) {
+  if (userAction) state.wantRunning = false;
+  state.running = false;
+  cancelAnimationFrame(state.loopId);
+  if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
+  state.stream = null;
+  video.srcObject = null;
+  try { state.wakeLock?.release(); } catch { /* noop */ }
+  state.wakeLock = null;
+  overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+  $('#placeholder').hidden = false;
+  $('#btn-camera').textContent = 'カメラ開始';
+  $('#btn-camera').classList.add('primary');
+  $('#btn-shot').disabled = true;
+  meter.hidden = true;
+  setStatus(cv ? '停止中' : 'OpenCV 読み込み中…');
+}
+
+// iOS はバックグラウンドでカメラを止めるので、戻ったら開き直す
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (state.running) stopCamera(false);
+  } else if (state.wantRunning && !state.running) {
+    startCamera();
+  }
+});
+
+// ===== 検出ループ =====
+function loop() {
+  if (!state.running) return;
+  state.loopId = requestAnimationFrame(loop);
+  const now = performance.now();
+  if (now - state.lastTick < DETECT_INTERVAL || !cv || state.capturing) return;
+  if (video.readyState < 2 || !video.videoWidth) return;
+  state.lastTick = now;
+  let r;
+  try { r = detect(); } catch (e) { console.error(e); return; }
+  state.last = { ...r, at: now };
+  drawOverlay(r);
+  onDetect(r, now);
+}
+
+function orderCorners(pts) {
+  // 左上, 右上, 右下, 左下 の順に並べる
+  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const byDiff = [...pts].sort((a, b) => (a.y - a.x) - (b.y - b.x));
+  return [bySum[0], byDiff[0], bySum[3], byDiff[3]];
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function detect() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const scale = Math.min(1, PROC_MAX / Math.max(vw, vh));
+  const pw = Math.round(vw * scale), ph = Math.round(vh * scale);
+  if (procCanvas.width !== pw || procCanvas.height !== ph) { procCanvas.width = pw; procCanvas.height = ph; }
+  procCtx.drawImage(video, 0, 0, pw, ph);
+
+  // 作った Mat はすべて finally でまとめて delete する（WASM ヒープのリーク防止）
+  const mats = [];
+  const keep = (m) => { mats.push(m); return m; };
+  try {
+    const src = keep(cv.imread(procCanvas));
+    const gray = keep(new cv.Mat());
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const blur = keep(new cv.Mat());
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+    const edges = keep(new cv.Mat());
+    cv.Canny(blur, edges, 40, 120);
+    cv.dilate(edges, edges, state.kernel);
+    const contours = keep(new cv.MatVector());
+    const hierarchy = keep(new cv.Mat());
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const frameArea = pw * ph;
+    let best = null, bestArea = 0;
+    const n = contours.size();
+    for (let i = 0; i < n; i++) {
+      const c = keep(contours.get(i)); // get() も新しい Mat を返すので delete が必要
+      const area = cv.contourArea(c);
+      if (area < frameArea * MIN_AREA || area > frameArea * 0.98 || area <= bestArea) continue;
+      const approx = keep(new cv.Mat());
+      cv.approxPolyDP(c, approx, 0.02 * cv.arcLength(c, true), true);
+      if (approx.rows !== 4 || !cv.isContourConvex(approx)) continue;
+      const pts = [];
+      for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+      const q = orderCorners(pts);
+      // 極端に細長い・つぶれた四角形は除外
+      const w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
+      const h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
+      const ratio = Math.max(w, h) / Math.max(1, Math.min(w, h));
+      if (ratio > 2.5) continue;
+      best = q; bestArea = area;
+    }
+    if (!best) return { quad: null, scale, pw, ph };
+
+    // ピント判定：四角形の内側（少し内寄せ）のラプラシアン分散
+    const xs = best.map((p) => p.x), ys = best.map((p) => p.y);
+    let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const ix = (x1 - x0) * 0.15, iy = (y1 - y0) * 0.15;
+    x0 = Math.max(0, Math.round(x0 + ix)); y0 = Math.max(0, Math.round(y0 + iy));
+    x1 = Math.min(pw, Math.round(x1 - ix)); y1 = Math.min(ph, Math.round(y1 - iy));
+    let sharp = 0;
+    if (x1 - x0 > 8 && y1 - y0 > 8) {
+      const roi = keep(gray.roi(new cv.Rect(x0, y0, x1 - x0, y1 - y0)));
+      const lap = keep(new cv.Mat());
+      cv.Laplacian(roi, lap, cv.CV_64F);
+      const mean = keep(new cv.Mat()), std = keep(new cv.Mat());
+      cv.meanStdDev(lap, mean, std);
+      sharp = std.data64F[0] ** 2;
+    }
+    return { quad: best, sharp, scale, pw, ph };
+  } finally {
+    for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
+  }
+}
+
+function drawOverlay(r) {
+  const rect = overlay.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(rect.width * dpr), H = Math.round(rect.height * dpr);
+  if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
+  overlayCtx.clearRect(0, 0, W, H);
+  if (!r.quad) return;
+  // video は object-fit: contain なので、表示位置に合わせて座標を変換する
+  const s = Math.min(W / r.pw, H / r.ph);
+  const ox = (W - r.pw * s) / 2, oy = (H - r.ph * s) / 2;
+  overlayCtx.lineWidth = 3 * dpr;
+  overlayCtx.strokeStyle = !state.armed ? '#9a9a9f' : r.sharp >= settings.sharp ? '#2f9e6b' : '#e0a321';
+  overlayCtx.beginPath();
+  r.quad.forEach((p, i) => {
+    const x = ox + p.x * s, y = oy + p.y * s;
+    i ? overlayCtx.lineTo(x, y) : overlayCtx.moveTo(x, y);
+  });
+  overlayCtx.closePath();
+  overlayCtx.stroke();
+}
+
+function updateMeter(sharp) {
+  const ratio = Math.min(1, sharp / Math.max(1, settings.sharp * 1.5));
+  meter.firstElementChild.style.width = (ratio * 100).toFixed(0) + '%';
+  meter.classList.toggle('ok', sharp >= settings.sharp);
+  meter.title = 'ピント: ' + Math.round(sharp);
+}
+
+function onDetect(r, now) {
+  if (!r.quad) {
+    state.prev = null; state.stableSince = 0;
+    if (!state.lostSince) state.lostSince = now;
+    if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
+    updateMeter(0);
+    setStatus(state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
+    return;
+  }
+  state.lostSince = 0;
+  updateMeter(r.sharp);
+  const diag = Math.hypot(r.pw, r.ph);
+  const move = state.prev ? Math.max(...r.quad.map((p, i) => dist(p, state.prev[i]))) / diag : Infinity;
+  state.prev = r.quad;
+  if (move > STABLE_TOL) state.stableSince = now;
+
+  if (!state.armed) { setStatus('撮影済み — 次の名刺に替えてください'); return; }
+  const stableFor = now - state.stableSince;
+  if (stableFor < STABLE_MS) { setStatus('静止してください'); return; }
+  if (r.sharp < settings.sharp) { setStatus(`ピント合わせ中（${Math.round(r.sharp)} / ${settings.sharp}）`); return; }
+  if (!settings.auto) { setStatus('撮影できます（手動撮影）'); return; }
+  capture(r.quad, r.scale);
+}
+
+// ===== 撮影（台形補正） =====
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('画像の変換に失敗しました'))), type, quality));
+}
+function flash() {
+  const f = $('#flash');
+  f.classList.add('on');
+  requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
+  try { navigator.vibrate?.(60); } catch { /* iOS は未対応 */ }
+}
+
+async function capture(quad, scale) {
+  if (state.capturing || !cv) return;
+  state.capturing = true;
+  state.armed = false;
+  try {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) throw new Error('映像がありません');
+    fullCanvas.width = vw; fullCanvas.height = vh;
+    fullCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+
+    if (quad) {
+      const q = quad.map((p) => ({ x: p.x / scale, y: p.y / scale }));
+      let w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
+      let h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
+      const k = Math.min(1, OUT_MAX / Math.max(w, h));
+      w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+      const mats = [];
+      const keep = (m) => { mats.push(m); return m; };
+      try {
+        const src = keep(cv.imread(fullCanvas));
+        const srcTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap((p) => [p.x, p.y])));
+        const dstTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w, 0, w, h, 0, h]));
+        const M = keep(cv.getPerspectiveTransform(srcTri, dstTri));
+        const dst = keep(new cv.Mat());
+        cv.warpPerspective(src, dst, M, new cv.Size(w, h), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
+        cv.imshow(outCanvas, dst);
+      } finally {
+        for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
+      }
+    } else {
+      // 四角形が見つからないときの手動撮影：フレーム全体を縮小して保存
+      const k = Math.min(1, OUT_MAX / Math.max(vw, vh));
+      outCanvas.width = Math.round(vw * k); outCanvas.height = Math.round(vh * k);
+      outCanvas.getContext('2d').drawImage(fullCanvas, 0, 0, outCanvas.width, outCanvas.height);
+    }
+    // 大きなキャンバスのメモリを解放（iOS はキャンバスの合計メモリに上限がある）
+    fullCanvas.width = fullCanvas.height = 1;
+    flash();
+
+    const blob = await canvasToBlob(outCanvas, 'image/jpeg', JPEG_QUALITY);
+    const tk = Math.min(1, 240 / Math.max(outCanvas.width, outCanvas.height));
+    const tc = document.createElement('canvas');
+    tc.width = Math.max(1, Math.round(outCanvas.width * tk));
+    tc.height = Math.max(1, Math.round(outCanvas.height * tk));
+    tc.getContext('2d').drawImage(outCanvas, 0, 0, tc.width, tc.height);
+    const thumbBlob = await canvasToBlob(tc, 'image/jpeg', 0.7);
+
+    // iOS の古い Safari は IndexedDB への Blob 保存が不安定だったため ArrayBuffer で保存する
+    const rec = {
+      id: newId(),
+      createdAt: new Date().toISOString(),
+      mime: 'image/jpeg',
+      data: await blob.arrayBuffer(),
+      thumb: await thumbBlob.arrayBuffer(),
+      width: outCanvas.width,
+      height: outCanvas.height,
+    };
+    await dbPut(rec);
+    addItem(rec);
+    renderTray();
+    setStatus('撮影しました');
+  } catch (e) {
+    console.error(e);
+    toast('撮影に失敗しました: ' + (e && e.message || e), 5000);
+  } finally {
+    state.capturing = false;
+  }
+}
+
+// ===== 送信 =====
+function blobToBase64(buf, type) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => { const s = String(fr.result); resolve(s.slice(s.indexOf(',') + 1)); };
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(new Blob([buf], { type }));
+  });
+}
+
+const ERROR_TEXT = {
+  unauthorized: 'トークンが違います',
+  not_configured: 'GAS の setup() が未実行です',
+  processing: '別の送信が処理中です（後で再送してください）',
+  bad_image: '画像が大きすぎるか壊れています',
+  bad_card_id: 'カードIDが不正です',
+};
+
+// GAS は script.google.com で 302 を返し、script.googleusercontent.com へリダイレクトする。
+// fetch はリダイレクトを自動で追い、リダイレクト先は Access-Control-Allow-Origin: * を返すので
+// 本文を読める。Content-Type を text/plain にしてプリフライト（GAS は OPTIONS に応答しない）を避ける。
+async function postToGas(payload) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT);
+  try {
+    const res = await fetch(settings.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error(`GAS の応答が JSON ではありません（HTTP ${res.status}）。URL とデプロイ設定を確認してください`); }
+    return data;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('タイムアウトしました');
+    if (e instanceof TypeError) {
+      throw new Error('通信できませんでした（電波状況、URL、ウェブアプリのアクセスが「全員」になっているかを確認）');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function checkSettings() {
+  // 個人: /macros/s/…/exec、Workspace: /a/macros/<ドメイン>/s/…/exec
+  if (!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/.test(settings.gasUrl)) {
+    toast('設定で GAS の URL（/exec で終わるもの）を入力してください', 5000);
+    openSettings();
+    return false;
+  }
+  if (!settings.token) {
+    toast('設定でトークンを入力してください', 5000);
+    openSettings();
+    return false;
+  }
+  return true;
+}
+
+async function sendOne(it) {
+  it.status = 'sending'; it.error = ''; renderTray();
+  try {
+    const rec = await dbGet(it.id);
+    if (!rec) { removeItem(it.id); return 'gone'; }
+    const image = await blobToBase64(rec.data, rec.mime);
+    const data = await postToGas({
+      action: 'add',
+      token: settings.token,
+      cardId: rec.id,
+      mimeType: rec.mime,
+      capturedAt: rec.createdAt,
+      image,
+    });
+    if (!data.ok) throw new Error(ERROR_TEXT[data.error] || data.error || '不明なエラー');
+    await dbDelete(it.id);
+    removeItem(it.id);
+    return data.duplicate ? 'duplicate' : 'ok';
+  } catch (e) {
+    it.status = 'error';
+    it.error = (e && e.message) || String(e);
+    return 'error';
+  } finally {
+    renderTray();
+  }
+}
+
+async function sendAll() {
+  if (state.sending || !checkSettings()) return;
+  const queue = state.items.filter((x) => x.status !== 'sending');
+  if (!queue.length) return;
+  state.sending = true; renderTray();
+  const counts = { ok: 0, duplicate: 0, error: 0, gone: 0 };
+  let next = 0;
+  const worker = async () => {
+    while (next < queue.length) {
+      const it = queue[next++];
+      counts[await sendOne(it)]++;
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+  } finally {
+    state.sending = false; renderTray();
+  }
+  const parts = [`登録 ${counts.ok}件`];
+  if (counts.duplicate) parts.push(`登録済み ${counts.duplicate}件`);
+  if (counts.error) parts.push(`失敗 ${counts.error}件（サムネイルをタップで詳細）`);
+  toast(parts.join(' / '), 6000);
+}
+
+// ===== 設定ダイアログ =====
+function openSettings() {
+  const dlg = $('#dlg-settings');
+  if (dlg.open) return; // 開いている間に呼ばれた場合（接続テスト中の入力不足など）
+  dlg.returnValue = '';
+  $('#in-url').value = settings.gasUrl;
+  $('#in-token').value = settings.token;
+  $('#in-sharp').value = settings.sharp;
+  $('#in-auto').checked = settings.auto;
+  dlg.showModal();
+}
+function readSettingsForm() {
+  const sharp = Number($('#in-sharp').value);
+  return {
+    gasUrl: $('#in-url').value.trim(),
+    token: $('#in-token').value.trim(),
+    sharp: Number.isFinite(sharp) && sharp > 0 ? sharp : DEFAULT_SETTINGS.sharp,
+    auto: $('#in-auto').checked,
+  };
+}
+$('#btn-settings').addEventListener('click', openSettings);
+$('#dlg-settings').addEventListener('close', () => {
+  if ($('#dlg-settings').returnValue === 'save') { saveSettings(readSettingsForm()); toast('保存しました'); }
+});
+$('#btn-ping').addEventListener('click', async () => {
+  const s = readSettingsForm();
+  const prev = settings;
+  settings = s; // 入力中の値でテスト
+  try {
+    if (!checkSettings()) return;
+    const data = await postToGas({ action: 'ping', token: s.token });
+    toast(data.ok ? '接続できました' : '接続エラー: ' + (ERROR_TEXT[data.error] || data.error), 5000);
+  } catch (e) {
+    toast('接続エラー: ' + e.message, 6000);
+  } finally {
+    settings = prev;
+  }
+});
+
+// ===== プレビュー =====
+let previewId = null, previewUrl = null;
+async function openPreview(id) {
+  const rec = await dbGet(id).catch(() => null);
+  if (!rec) return;
+  const it = state.items.find((x) => x.id === id);
+  previewId = id;
+  previewUrl = URL.createObjectURL(new Blob([rec.data], { type: rec.mime }));
+  $('#preview-img').src = previewUrl;
+  $('#preview-info').textContent =
+    `撮影: ${new Date(rec.createdAt).toLocaleString('ja-JP')}　${rec.width}×${rec.height}` +
+    (it && it.error ? `\n失敗理由: ${it.error}` : '');
+  $('#btn-delete').disabled = !!(it && it.status === 'sending');
+  $('#dlg-preview').showModal();
+}
+$('#dlg-preview').addEventListener('close', () => {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = null; previewId = null;
+  $('#preview-img').removeAttribute('src');
+});
+$('#btn-close-preview').addEventListener('click', () => $('#dlg-preview').close());
+$('#btn-delete').addEventListener('click', async () => {
+  if (!previewId || !confirm('この名刺を削除しますか？')) return;
+  const id = previewId;
+  try { await dbDelete(id); removeItem(id); renderTray(); } catch (e) { toast('削除に失敗しました: ' + e.message); }
+  $('#dlg-preview').close();
+});
+
+// ===== ボタン =====
+$('#btn-camera').addEventListener('click', () => (state.running ? stopCamera() : startCamera()));
+$('#btn-shot').addEventListener('click', () => {
+  if (!state.running || !cv) return;
+  const l = state.last;
+  const fresh = l && l.quad && performance.now() - l.at < 500;
+  capture(fresh ? l.quad : null, fresh ? l.scale : 1);
+});
+$('#btn-send').addEventListener('click', sendAll);
+window.addEventListener('beforeunload', (e) => {
+  if (state.sending) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// ===== 起動 =====
+(async () => {
+  try {
+    // ストレージを消されにくくする（対応ブラウザのみ）
+    navigator.storage?.persist?.().catch(() => {});
+    for (const rec of await dbAll()) addItem(rec);
+    state.items.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  } catch (e) {
+    console.error(e);
+    toast('保存領域（IndexedDB）を開けません。プライベートブラウズを解除してください', 6000);
+  }
+  renderTray();
+})();
+
+loadOpenCv().then((c) => {
+  cv = c;
+  state.kernel = cv.Mat.ones(3, 3, cv.CV_8U); // 使い回すのでページが開いている間は保持
+  $('#btn-shot').disabled = !state.running;
+  setStatus(state.running ? '名刺をかざしてください' : '準備完了');
+}).catch((e) => {
+  console.error(e);
+  setStatus('OpenCV の読み込みに失敗しました');
+  toast(e.message + '。ページを再読み込みしてください', 8000);
+});
+</script>
+</body>
+</html>

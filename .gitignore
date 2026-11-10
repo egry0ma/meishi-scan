@@ -1,0 +1,38 @@
+# 名刺画像・実データはコミットしない（テスト用の写真も含む）
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.heic
+*.heif
+*.bmp
+*.tif
+*.tiff
+*.pdf
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.json
+!package.json
+samples/
+test-images/
+data/
+exports/
+
+# 秘密情報（APIキー、トークン、GASのURLなど）
+.env
+.env.*
+*.secret
+*.key
+secrets/
+.clasp.json
+.clasprc.json
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+node_modules/
