@@ -75,6 +75,13 @@
   #login-button { min-height: 44px; margin-top: 4px; }
   details.admin { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
   details.admin summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .gate { position: fixed; inset: 0; z-index: 5; background: var(--bg); display: grid; place-items: center;
+    padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .gate-box { width: min(420px, 100%); text-align: center; }
+  .gate-box h2 { font-size: 20px; margin: 0 0 12px; }
+  .gate-box p { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 0 0 20px; }
+  #gate-login { display: flex; justify-content: center; min-height: 44px; }
+  #gate-admin { margin-top: 24px; }
   .qr { background: #fff; padding: 12px; border-radius: 8px; width: min(280px, 100%); margin: 8px auto; }
   .qr img { width: 100%; height: auto; display: block; image-rendering: pixelated; }
   .hint.warn { color: var(--warn); }
@@ -86,6 +93,15 @@
 </style>
 </head>
 <body>
+<div class="gate" id="gate" hidden>
+  <div class="gate-box">
+    <h2>名刺スキャン</h2>
+    <p id="gate-msg"></p>
+    <div id="gate-login"></div>
+    <button type="button" id="gate-admin" hidden>管理者向けの設定を開く</button>
+  </div>
+</div>
+
 <header>
   <h1>名刺スキャン</h1>
   <button id="btn-who" type="button" class="who">ログイン</button>
@@ -1413,6 +1429,7 @@ async function initLogin() {
         use_fedcm_for_prompt: true,
       });
       gisReadyFor = settings.clientId;
+      $('#gate-login').replaceChildren();
     }
     renderLogin();
     if (!currentAuth() && !prompted) { prompted = true; gid.prompt(); }
@@ -1422,9 +1439,35 @@ async function initLogin() {
   }
 }
 
-/** ログインの状態を、ヘッダーと設定画面に反映する */
+/**
+ * ログインしていないあいだは、撮影の画面を隠してログインの画面だけを出す。
+ * 送信先が未設定なら「参加用の QR を読み取ってください」とだけ出す（#admin で開いたときは設定の入り口も出す）。
+ */
+let gateWasShown = false;
+function renderGate(a, configured) {
+  const gate = $('#gate');
+  const show = !a;
+  gate.hidden = !show;
+  if (!show) { gateWasShown = false; return; }
+  if (!gateWasShown) {
+    gateWasShown = true;
+    if (state.running) stopCamera(false); // ログインし直すまで撮影は止める（撮った名刺は端末に残る）
+  }
+  $('#gate-msg').textContent = configured
+    ? '組織の Google アカウントでログインしてください。ログインした名前が「連絡先受領者氏名」に入ります。'
+    : '送信先が設定されていません。管理者から参加用の QR をもらって、スマホのカメラで読み取ってください。';
+  $('#gate-admin').hidden = !forceAdmin;
+  const box = $('#gate-login');
+  box.hidden = !configured;
+  if (configured && gisReadyFor === settings.clientId && window.google?.accounts?.id && !box.childElementCount) {
+    window.google.accounts.id.renderButton(box, { type: 'standard', theme: 'filled_blue', size: 'large', text: 'signin_with', shape: 'pill', locale: 'ja' });
+  }
+}
+
+/** ログインの状態を、ログインの画面・ヘッダー・設定画面に反映する */
 function renderLogin() {
   const a = currentAuth();
+  renderGate(a, CLIENT_ID_RE.test(settings.clientId) && GAS_URL_RE.test(settings.gasUrl));
   const who = $('#btn-who');
   who.textContent = a ? a.name : 'ログイン';
   who.classList.toggle('out', !a);
@@ -1443,13 +1486,20 @@ function renderLogin() {
   }
 }
 $('#btn-who').addEventListener('click', openSettings);
+$('#gate-admin').addEventListener('click', () => { openSettings(); $('#admin').open = true; });
 $('#btn-logout').addEventListener('click', () => {
   try { window.google?.accounts?.id?.disableAutoSelect(); } catch { /* noop */ }
   clearAuth();
   toast('ログアウトしました');
 });
 // 期限が切れたら表示を戻す（1分ごとに確認）
-setInterval(() => { if (!currentAuth() && $('#btn-who').textContent !== 'ログイン') renderLogin(); }, 60000);
+setInterval(() => {
+  if (!currentAuth() && $('#btn-who').textContent !== 'ログイン') {
+    renderLogin();
+    prompted = false; // 前にログインしたアカウントがあれば、自動でログインし直してもらう
+    initLogin();
+  }
+}, 30000);
 
 // ===== 設定済みリンクと QR（ベータ参加用） =====
 // リンクの形：<このページ>#setup=<{u: GAS の URL, c: OAuth クライアント ID} の JSON を base64url にしたもの>
@@ -1480,10 +1530,6 @@ function applySetupLink() {
     saveSettings({ ...settings, gasUrl: data.u, clientId: data.c });
     initLogin();
     toast('送信先を設定しました', 4000);
-  }
-  if (!currentAuth()) {
-    openSettings();
-    toast('組織の Google アカウントでログインしてください', 6000);
   }
 }
 
