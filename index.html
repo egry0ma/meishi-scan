@@ -149,6 +149,13 @@ const CLIP_LEVEL = 250;      // これ以上の明るさを「真っ白（白飛
 const GLARE_MIN = 0.008;     // 名刺の内側で真っ白な画素がこの割合以上あり、かつ…
 const PAPER_MAX = 235;       // …紙の地の色（明るさの中央値）がこれ未満なら「反射あり」。
                              // 地の色自体がこれ以上明るい白い名刺は、反射と紙の白さを見分けられないので止めない
+// 反射があるときの2枚合成
+const GLARE_MASK_SIZE = 64;    // 反射の位置を比べるための、名刺を正規化した小さな画像の一辺(px)
+const GLARE_TILT = 0.02;       // 1枚目のあと、角がこの量（対角線比）以上動いたら「傾けた」とみなす
+const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目でも反射している割合がこれ以下なら2枚目を撮る
+const GLARE_WAIT_MS = 10000;   // 2枚目をこの時間待っても撮れなければ、1枚目だけで保存する
+const GLARE_LOST_MS = 1500;    // 1枚目のあと名刺がこの時間見えなければ、1枚目だけで保存する
+const FUSE_LEVEL = 240;        // 合成時に「反射」として置き換える明るさ
 const STABLE_TOL = 0.012;    // 静止とみなす角の移動量（対角線比）
 const STABLE_MS = 600;       // この時間静止したら撮影候補
 const REARM_MS = 400;        // 名刺が見えなくなってからこの時間で次の撮影を許可
@@ -170,6 +177,7 @@ let cv = null;
 const state = {
   stream: null, running: false, wantRunning: false, loopId: 0, lastTick: 0,
   kernel: null, prev: null, stableSince: 0, lostSince: 0, armed: true, peak: 0,
+  glare: null, // 反射ありで1枚目を撮ったあと、2枚目を待っている間の { mat, mask, at, moved }
   exposure: { supported: false, min: 0, max: 0, step: 0, value: 0, lastAdjust: 0 },
   capturing: false, last: null, items: [], sending: false, wakeLock: null,
 };
@@ -377,6 +385,8 @@ async function startCamera() {
 
 function stopCamera(userAction = true) {
   if (userAction) state.wantRunning = false;
+  // 反射ありの1枚目が待機中なら、捨てずに1枚目だけで保存する
+  if (state.glare) finishGlareAlone('カメラを止めたため、反射が残ったまま保存しました');
   state.running = false;
   cancelAnimationFrame(state.loopId);
   if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
@@ -505,7 +515,18 @@ function detect() {
       }
       clipped = clip / n;
     }
-    return { quad: best, sharp, clipped, paper, fill, scale, pw, ph };
+
+    // 反射の位置：名刺を正方形に正規化した小さな画像での白飛びマスク（2枚合成で、反射が動いたかの判定に使う）
+    const MS = GLARE_MASK_SIZE;
+    const sTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, best.flatMap((p) => [p.x, p.y])));
+    const dTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, MS, 0, MS, MS, 0, MS]));
+    const Ms = keep(cv.getPerspectiveTransform(sTri, dTri));
+    const small = keep(new cv.Mat());
+    cv.warpPerspective(gray, small, Ms, new cv.Size(MS, MS));
+    const mask = new Uint8Array(MS * MS);
+    for (let i = 0; i < mask.length; i++) mask[i] = small.data[i] >= CLIP_LEVEL ? 1 : 0;
+
+    return { quad: best, sharp, clipped, paper, fill, mask, scale, pw, ph };
   } finally {
     for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
   }
@@ -568,13 +589,25 @@ function autoExposure(r, now) {
   track.applyConstraints({ advanced: [{ exposureCompensation: next }] }).catch(() => { ex.supported = false; });
 }
 
+/** 1枚目で反射していた位置のうち、今も反射している割合 */
+function glareOverlap(maskA, maskB) {
+  let a = 0, both = 0;
+  for (let i = 0; i < maskA.length; i++) if (maskA[i]) { a++; if (maskB[i]) both++; }
+  return a ? both / a : 0;
+}
+
+const TILT_MSG = '反射を消すため、名刺を少し傾けてください（もう1枚撮ります）';
+
 function onDetect(r, now) {
+  const g = state.glare;
+  if (g && now - g.at > GLARE_WAIT_MS) { finishGlareAlone('2枚目が撮れなかったため、反射が残ったまま保存しました'); return; }
   if (!r.quad) {
     state.prev = null; state.stableSince = 0; state.peak = 0;
     if (!state.lostSince) state.lostSince = now;
+    if (g && now - state.lostSince > GLARE_LOST_MS) { finishGlareAlone('名刺が外れたため、反射が残ったまま保存しました'); return; }
     if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
     updateMeter(0);
-    setStatus(state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
+    setStatus(g ? TILT_MSG : state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
     return;
   }
   state.lostSince = 0;
@@ -584,22 +617,30 @@ function onDetect(r, now) {
   state.prev = r.quad;
   // 動いたら静止の計測とピントの最高値をやり直す
   if (move > STABLE_TOL) { state.stableSince = now; state.peak = 0; }
+  if (g && move > GLARE_TILT) g.moved = true;
   state.peak = Math.max(state.peak, r.sharp);
   updateMeter(r.sharp);
 
   if (!state.armed) { setStatus('撮影済み — 次の名刺に替えてください'); return; }
   if (r.fill < MIN_FILL) { setStatus('もう少し近づけてください'); return; }
-  if (hasGlare(r)) {
-    setStatus(state.exposure.supported
-      ? '反射を抑えています…（角度を少し変えると早く撮れます）'
-      : '光が反射しています。名刺の角度を少し変えてください（手動撮影もできます）');
+  const stableFor = now - state.stableSince;
+
+  // 反射ありで1枚目を撮ったあと：傾けて反射の位置がずれたら2枚目を撮って合成する
+  if (g) {
+    if (!g.moved) { setStatus(TILT_MSG); return; }
+    if (stableFor < STABLE_MS) { setStatus('そのまま静止してください（2枚目）'); return; }
+    if (!sharpEnough(r)) { setStatus('ピント合わせ中…（2枚目）'); return; }
+    if (glareOverlap(g.mask, r.mask) > GLARE_OVERLAP_MAX) { setStatus('まだ同じ所が反射しています。もう少し傾けてください'); return; }
+    captureGlareSecond(r.quad, r.scale);
     return;
   }
-  const stableFor = now - state.stableSince;
-  if (stableFor < STABLE_MS) { setStatus('静止してください'); return; }
+
+  const glare = hasGlare(r);
+  if (stableFor < STABLE_MS) { setStatus(glare ? '反射があります。静止すると2枚撮って反射を消します' : '静止してください'); return; }
   if (!sharpEnough(r)) { setStatus('ピント合わせ中…'); return; }
-  if (!settings.auto) { setStatus('撮影できます（手動撮影）'); return; }
-  capture(r.quad, r.scale);
+  if (!settings.auto) { setStatus(glare ? '反射があります（手動撮影で撮れます）' : '撮影できます（手動撮影）'); return; }
+  if (glare) captureGlareFirst(r.quad, r.scale, r.mask);
+  else capture(r.quad, r.scale);
 }
 
 // ===== 撮影（台形補正） =====
@@ -619,73 +660,194 @@ function flash() {
   try { navigator.vibrate?.(60); } catch { /* iOS は未対応 */ }
 }
 
+/**
+ * 今の映像フレームを台形補正した Mat（RGBA）を返す。呼び出し側で delete すること。
+ * quad が無いときはフレーム全体を縮小して返す。size を渡すとその大きさに揃える（2枚合成用）。
+ */
+function grabWarped(quad, scale, size) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) throw new Error('映像がありません');
+  fullCanvas.width = vw; fullCanvas.height = vh;
+  fullCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+  const mats = [];
+  const keep = (m) => { mats.push(m); return m; };
+  try {
+    const src = keep(cv.imread(fullCanvas));
+    const dst = new cv.Mat();
+    try {
+      if (!quad) {
+        // 四角形が見つからないときの手動撮影：フレーム全体を縮小して保存
+        const k = Math.min(1, OUT_MAX / Math.max(vw, vh));
+        cv.resize(src, dst, new cv.Size(Math.round(vw * k), Math.round(vh * k)), 0, 0, cv.INTER_AREA);
+        return dst;
+      }
+      const q = quad.map((p) => ({ x: p.x / scale, y: p.y / scale }));
+      let w, h;
+      if (size) {
+        ({ w, h } = size);
+      } else {
+        w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
+        h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
+        const k = Math.min(1, OUT_MAX / Math.max(w, h));
+        w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+      }
+      const srcTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap((p) => [p.x, p.y])));
+      const dstTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w, 0, w, h, 0, h]));
+      const M = keep(cv.getPerspectiveTransform(srcTri, dstTri));
+      cv.warpPerspective(src, dst, M, new cv.Size(w, h), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
+      return dst;
+    } catch (e) {
+      dst.delete();
+      throw e;
+    }
+  } finally {
+    for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
+    // 大きなキャンバスのメモリを解放（iOS はキャンバスの合計メモリに上限がある）
+    fullCanvas.width = fullCanvas.height = 1;
+  }
+}
+
+/**
+ * 反射の合成：1枚目（a）を元に、1枚目で反射していた部分（とその周りのにじみ）だけ、
+ * 画素ごとに1枚目と2枚目（b）の暗いほうを採る。反射は明るいので、反射していない側が残る。
+ * 置き換える範囲の境目はぼかしてなじませる。新しい Mat を返す（呼び出し側で delete）。
+ */
+function fuseGlare(a, b) {
+  const mats = [];
+  const keep = (m) => { mats.push(m); return m; };
+  try {
+    const ga = keep(new cv.Mat()), gb = keep(new cv.Mat());
+    cv.cvtColor(a, ga, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(b, gb, cv.COLOR_RGBA2GRAY);
+    const region = keep(new cv.Mat());
+    cv.threshold(ga, region, FUSE_LEVEL - 1, 255, cv.THRESH_BINARY);
+    // 反射の周りのにじみも含めるよう広げる
+    const rad = Math.max(3, Math.round(Math.max(a.cols, a.rows) * 0.03));
+    const kernel = keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(rad * 2 + 1, rad * 2 + 1)));
+    cv.dilate(region, region, kernel);
+    const alpha = keep(new cv.Mat());
+    region.convertTo(alpha, cv.CV_32F, 1 / 255);
+    cv.GaussianBlur(alpha, alpha, new cv.Size(rad * 4 + 1, rad * 4 + 1), 0);
+
+    const out = a.clone();
+    const A = a.data, B = b.data, O = out.data, al = alpha.data32F, LA = ga.data, LB = gb.data;
+    for (let i = 0; i < al.length; i++) {
+      const t = al[i];
+      if (t <= 0.002 || LB[i] >= LA[i]) continue; // 2枚目のほうが暗い画素だけ寄せる
+      const j = i * 4;
+      O[j] = A[j] + (B[j] - A[j]) * t;
+      O[j + 1] = A[j + 1] + (B[j + 1] - A[j + 1]) * t;
+      O[j + 2] = A[j + 2] + (B[j + 2] - A[j + 2]) * t;
+    }
+    return out;
+  } finally {
+    for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
+  }
+}
+
 async function capture(quad, scale) {
   if (state.capturing || !cv) return;
   state.capturing = true;
   state.armed = false;
+  let mat = null;
   try {
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (!vw || !vh) throw new Error('映像がありません');
-    fullCanvas.width = vw; fullCanvas.height = vh;
-    fullCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
-
-    if (quad) {
-      const q = quad.map((p) => ({ x: p.x / scale, y: p.y / scale }));
-      let w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
-      let h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
-      const k = Math.min(1, OUT_MAX / Math.max(w, h));
-      w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
-      const mats = [];
-      const keep = (m) => { mats.push(m); return m; };
-      try {
-        const src = keep(cv.imread(fullCanvas));
-        const srcTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, q.flatMap((p) => [p.x, p.y])));
-        const dstTri = keep(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w, 0, w, h, 0, h]));
-        const M = keep(cv.getPerspectiveTransform(srcTri, dstTri));
-        const dst = keep(new cv.Mat());
-        cv.warpPerspective(src, dst, M, new cv.Size(w, h), cv.INTER_LINEAR, cv.BORDER_REPLICATE, new cv.Scalar());
-        cv.imshow(outCanvas, dst);
-      } finally {
-        for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
-      }
-    } else {
-      // 四角形が見つからないときの手動撮影：フレーム全体を縮小して保存
-      const k = Math.min(1, OUT_MAX / Math.max(vw, vh));
-      outCanvas.width = Math.round(vw * k); outCanvas.height = Math.round(vh * k);
-      outCanvas.getContext('2d').drawImage(fullCanvas, 0, 0, outCanvas.width, outCanvas.height);
-    }
-    // 大きなキャンバスのメモリを解放（iOS はキャンバスの合計メモリに上限がある）
-    fullCanvas.width = fullCanvas.height = 1;
+    mat = grabWarped(quad, scale);
     flash();
-
-    const blob = await canvasToBlob(outCanvas, 'image/jpeg', JPEG_QUALITY);
-    const tk = Math.min(1, 240 / Math.max(outCanvas.width, outCanvas.height));
-    const tc = document.createElement('canvas');
-    tc.width = Math.max(1, Math.round(outCanvas.width * tk));
-    tc.height = Math.max(1, Math.round(outCanvas.height * tk));
-    tc.getContext('2d').drawImage(outCanvas, 0, 0, tc.width, tc.height);
-    const thumbBlob = await canvasToBlob(tc, 'image/jpeg', 0.7);
-
-    // iOS の古い Safari は IndexedDB への Blob 保存が不安定だったため ArrayBuffer で保存する
-    const rec = {
-      id: newId(),
-      createdAt: new Date().toISOString(),
-      mime: 'image/jpeg',
-      data: await blob.arrayBuffer(),
-      thumb: await thumbBlob.arrayBuffer(),
-      width: outCanvas.width,
-      height: outCanvas.height,
-    };
-    await dbPut(rec);
-    addItem(rec);
-    renderTray();
+    await saveMat(mat);
     setStatus('撮影しました');
   } catch (e) {
     console.error(e);
     toast('撮影に失敗しました: ' + (e && e.message || e), 5000);
   } finally {
+    if (mat) mat.delete();
     state.capturing = false;
   }
+}
+
+/** 反射ありの1枚目：保存はせず、2枚目を待つ */
+function captureGlareFirst(quad, scale, mask) {
+  if (state.capturing || !cv || state.glare) return;
+  try {
+    const mat = grabWarped(quad, scale);
+    flash();
+    state.glare = { mat, mask, at: performance.now(), moved: false };
+    setStatus(TILT_MSG);
+  } catch (e) {
+    console.error(e);
+    toast('撮影に失敗しました: ' + (e && e.message || e), 5000);
+  }
+}
+
+/** 反射ありの2枚目：1枚目と合成して保存する */
+async function captureGlareSecond(quad, scale) {
+  const g = state.glare;
+  if (!g || state.capturing) return;
+  state.capturing = true;
+  state.glare = null;
+  state.armed = false;
+  let b = null, fused = null;
+  try {
+    b = grabWarped(quad, scale, { w: g.mat.cols, h: g.mat.rows });
+    flash();
+    fused = fuseGlare(g.mat, b);
+    await saveMat(fused);
+    setStatus('反射を消して保存しました');
+  } catch (e) {
+    console.error(e);
+    // 合成に失敗しても、1枚目は残す
+    try { await saveMat(g.mat); toast('合成に失敗したため、1枚目だけを保存しました', 5000); }
+    catch (e2) { toast('撮影に失敗しました: ' + (e2 && e2.message || e2), 5000); }
+  } finally {
+    g.mat.delete();
+    if (b) b.delete();
+    if (fused) fused.delete();
+    state.capturing = false;
+  }
+}
+
+/** 2枚目が撮れないとき：1枚目だけで保存する */
+async function finishGlareAlone(message) {
+  const g = state.glare;
+  if (!g || state.capturing) return;
+  state.capturing = true;
+  state.glare = null;
+  state.armed = false;
+  try {
+    await saveMat(g.mat);
+    if (message) toast(message, 5000);
+  } catch (e) {
+    console.error(e);
+    toast('撮影に失敗しました: ' + (e && e.message || e), 5000);
+  } finally {
+    g.mat.delete();
+    state.capturing = false;
+  }
+}
+
+/** 台形補正済みの Mat を JPEG にして IndexedDB に保存し、一覧に加える */
+async function saveMat(mat) {
+  cv.imshow(outCanvas, mat);
+  const blob = await canvasToBlob(outCanvas, 'image/jpeg', JPEG_QUALITY);
+  const tk = Math.min(1, 240 / Math.max(outCanvas.width, outCanvas.height));
+  const tc = document.createElement('canvas');
+  tc.width = Math.max(1, Math.round(outCanvas.width * tk));
+  tc.height = Math.max(1, Math.round(outCanvas.height * tk));
+  tc.getContext('2d').drawImage(outCanvas, 0, 0, tc.width, tc.height);
+  const thumbBlob = await canvasToBlob(tc, 'image/jpeg', 0.7);
+
+  // iOS の古い Safari は IndexedDB への Blob 保存が不安定だったため ArrayBuffer で保存する
+  const rec = {
+    id: newId(),
+    createdAt: new Date().toISOString(),
+    mime: 'image/jpeg',
+    data: await blob.arrayBuffer(),
+    thumb: await thumbBlob.arrayBuffer(),
+    width: outCanvas.width,
+    height: outCanvas.height,
+  };
+  await dbPut(rec);
+  addItem(rec);
+  renderTray();
 }
 
 // ===== 送信 =====
@@ -886,6 +1048,12 @@ $('#btn-shot').addEventListener('click', () => {
   if (!state.running || !cv) return;
   const l = state.last;
   const fresh = l && l.quad && performance.now() - l.at < 500;
+  // 反射ありの1枚目が待機中なら、今の映像を2枚目にして合成する（名刺が見えなければ1枚目だけ保存）
+  if (state.glare) {
+    if (fresh) captureGlareSecond(l.quad, l.scale);
+    else finishGlareAlone();
+    return;
+  }
   capture(fresh ? l.quad : null, fresh ? l.scale : 1);
 });
 $('#btn-send').addEventListener('click', sendAll);
