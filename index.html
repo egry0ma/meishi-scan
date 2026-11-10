@@ -19,6 +19,7 @@
     --line: #333;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
   body { display: flex; flex-direction: column; min-height: 100dvh;
@@ -456,42 +457,64 @@ function detect() {
     const src = keep(cv.imread(procCanvas));
     const gray = keep(new cv.Mat());
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    const blur = keep(new cv.Mat());
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    const edges = keep(new cv.Mat());
-    cv.Canny(blur, edges, 40, 120);
-    cv.dilate(edges, edges, state.kernel);
-    const contours = keep(new cv.MatVector());
-    const hierarchy = keep(new cv.Mat());
-    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    // 名刺の縁を3通りで探し、見つかった四角形のうちいちばん大きいものを採る
+    //  1. 明るさの縁（弱いぼかし）：細かい縁まで拾う。無地の机ならこれで十分
+    //  2. 明るさの縁（強いぼかし）：木目のような細かい模様を消してから探す
+    //  3. 色の濃さ（彩度）の縁：橙で色の濃い木の机と、白い縁の名刺を見分けやすい
+    const blur5 = keep(new cv.Mat());
+    cv.GaussianBlur(gray, blur5, new cv.Size(5, 5), 0);
+    const e1 = keep(new cv.Mat());
+    cv.Canny(blur5, e1, 40, 120);
+    const blur9 = keep(new cv.Mat());
+    cv.GaussianBlur(gray, blur9, new cv.Size(9, 9), 0);
+    const e2 = keep(new cv.Mat());
+    cv.Canny(blur9, e2, 40, 120);
+    const rgb = keep(new cv.Mat());
+    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    const hsv = keep(new cv.Mat());
+    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+    const chans = keep(new cv.MatVector());
+    cv.split(hsv, chans);
+    const sat = keep(chans.get(1));
+    const satBlur = keep(new cv.Mat());
+    cv.GaussianBlur(sat, satBlur, new cv.Size(7, 7), 0);
+    const e3 = keep(new cv.Mat());
+    cv.Canny(satBlur, e3, 30, 90);
+    const edgeMaps = [e1, e2, e3];
 
     const frameArea = pw * ph;
-    let best = null, bestArea = 0;
+    let best = null, bestArea = 0, method = 0;
     // 判定の詳細表示用：画面の縦か横にいちばん広がっている輪郭（閉じていない線は面積が 0 になるので、面積では選ばない）
     let largest = null, largestSpan = 0;
-    const n = contours.size();
-    for (let i = 0; i < n; i++) {
-      const c = keep(contours.get(i)); // get() も新しい Mat を返すので delete が必要
-      const area = cv.contourArea(c);
-      if (settings.debug) {
-        const rc = cv.boundingRect(c);
-        const span = Math.max(rc.width / pw, rc.height / ph);
-        if (span > largestSpan) { largestSpan = span; largest = c; }
+    edgeMaps.forEach((edges, k) => {
+      cv.dilate(edges, edges, state.kernel);
+      const contours = keep(new cv.MatVector());
+      const hierarchy = keep(new cv.Mat());
+      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      const n = contours.size();
+      for (let i = 0; i < n; i++) {
+        const c = keep(contours.get(i)); // get() も新しい Mat を返すので delete が必要
+        const area = cv.contourArea(c);
+        if (settings.debug && k === 0) {
+          const rc = cv.boundingRect(c);
+          const span = Math.max(rc.width / pw, rc.height / ph);
+          if (span > largestSpan) { largestSpan = span; largest = c; }
+        }
+        if (area < frameArea * MIN_AREA || area > frameArea * 0.98 || area <= bestArea) continue;
+        const approx = keep(new cv.Mat());
+        cv.approxPolyDP(c, approx, 0.02 * cv.arcLength(c, true), true);
+        if (approx.rows !== 4 || !cv.isContourConvex(approx)) continue;
+        const pts = [];
+        for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+        const q = orderCorners(pts);
+        // 極端に細長い・つぶれた四角形は除外
+        const w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
+        const h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
+        const ratio = Math.max(w, h) / Math.max(1, Math.min(w, h));
+        if (ratio > 2.5) continue;
+        best = q; bestArea = area; method = k + 1;
       }
-      if (area < frameArea * MIN_AREA || area > frameArea * 0.98 || area <= bestArea) continue;
-      const approx = keep(new cv.Mat());
-      cv.approxPolyDP(c, approx, 0.02 * cv.arcLength(c, true), true);
-      if (approx.rows !== 4 || !cv.isContourConvex(approx)) continue;
-      const pts = [];
-      for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-      const q = orderCorners(pts);
-      // 極端に細長い・つぶれた四角形は除外
-      const w = Math.max(dist(q[0], q[1]), dist(q[3], q[2]));
-      const h = Math.max(dist(q[0], q[3]), dist(q[1], q[2]));
-      const ratio = Math.max(w, h) / Math.max(1, Math.min(w, h));
-      if (ratio > 2.5) continue;
-      best = q; bestArea = area;
-    }
+    });
     if (!best) {
       // 判定の詳細表示用：いちばん大きい輪郭が四角形にならなかった理由の手がかり
       let largestInfo = null;
@@ -505,7 +528,12 @@ function detect() {
           touches: rc.x <= 2 || rc.y <= 2 || rc.x + rc.width >= pw - 2 || rc.y + rc.height >= ph - 2,
         };
       }
-      return { quad: null, scale, pw, ph, largest: largestInfo };
+      // 露出の自動調整用：画面中央の白飛びの割合（反射で四角形が見つからないときにも暗くできるように）
+      const cx0 = Math.round(pw * 0.25), cx1 = Math.round(pw * 0.75), cy0 = Math.round(ph * 0.25), cy1 = Math.round(ph * 0.75);
+      let cc = 0;
+      for (let y = cy0; y < cy1; y++) for (let x = cx0; x < cx1; x++) if (gray.data[y * pw + x] >= CLIP_LEVEL) cc++;
+      const centerClipped = cc / Math.max(1, (cx1 - cx0) * (cy1 - cy0));
+      return { quad: null, scale, pw, ph, largest: largestInfo, centerClipped };
     }
 
     const xs = best.map((p) => p.x), ys = best.map((p) => p.y);
@@ -554,7 +582,7 @@ function detect() {
     const mask = new Uint8Array(MS * MS);
     for (let i = 0; i < mask.length; i++) mask[i] = small.data[i] >= CLIP_LEVEL ? 1 : 0;
 
-    return { quad: best, sharp, clipped, paper, fill, mask, scale, pw, ph };
+    return { quad: best, method, sharp, clipped, paper, fill, mask, scale, pw, ph };
   } finally {
     for (const m of mats) { try { m.delete(); } catch { /* noop */ } }
   }
@@ -603,14 +631,15 @@ function updateMeter(sharp) {
 /**
  * 露出の自動調整（カメラが露出補正に対応している場合のみ。iPhone の Safari などは非対応）。
  * 真っ白な部分があれば（反射でも、白い紙が飛んでいるだけでも）少し暗くし、
- * 白飛びが無く紙が暗すぎるときは 0 まで戻す。
+ * 白飛びがほぼ無く、紙が明るすぎないときは 0 まで少しずつ戻す。
+ * 名刺が見つからないときは、画面中央の白飛び（r.clipped に入れて渡す）が多ければ暗くする。
  */
 function autoExposure(r, now) {
   const ex = state.exposure;
   if (!ex.supported || !state.stream || now - ex.lastAdjust < 500) return;
   let next = ex.value;
   if (r.clipped >= GLARE_MIN) next = Math.max(ex.min, ex.value - ex.step);
-  else if (r.paper < 120 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
+  else if (r.clipped < GLARE_MIN / 4 && r.paper < 200 && ex.value < 0) next = Math.min(0, ex.value + ex.step);
   if (next === ex.value) return;
   ex.value = next; ex.lastAdjust = now;
   const track = state.stream.getVideoTracks()[0];
@@ -637,7 +666,7 @@ function showDebug(r, m, now) {
   const pct = (v) => (v * 100).toFixed(1) + '%';
   const lines = [];
   if (!r.quad) {
-    lines.push('四角形: ✕ 見つからない');
+    lines.push(`四角形: ✕ 見つからない（画面中央の白飛び ${pct(r.centerClipped || 0)}）`);
     const L = r.largest;
     if (L) {
       lines.push(`  最大の輪郭: 画面の ${pct(L.span)} に広がる / 頂点 ${L.vertices}（4 で四角形）`);
@@ -648,7 +677,7 @@ function showDebug(r, m, now) {
     }
   } else {
     const g = state.glare;
-    lines.push('四角形: ○');
+    lines.push(`四角形: ○（${['', '明るさの縁', '明るさの縁・強いぼかし', '色の濃さの縁'][r.method]}で検出）`);
     lines.push(`大きさ: ${pct(r.fill)}（${pct(MIN_FILL)} 以上）${ok(r.fill >= MIN_FILL)}`);
     const moveText = Number.isFinite(m.move) ? pct(m.move) : '—';
     lines.push(`静止: ${Math.min(STABLE_MS, Math.round(m.stableFor))} / ${STABLE_MS}ms（動き ${moveText}・${pct(STABLE_TOL)} 以下）${ok(m.stableFor >= STABLE_MS)}`);
@@ -671,6 +700,8 @@ function onDetect(r, now) {
     if (!state.lostSince) state.lostSince = now;
     if (g && now - state.lostSince > GLARE_LOST_MS) { finishGlareAlone('名刺が外れたため、反射が残ったまま保存しました'); return; }
     if (!state.armed && now - state.lostSince > REARM_MS) state.armed = true;
+    // 名刺が見つからなくても、画面中央が大きく白飛びしていれば露出を下げる（戻すのは名刺が見えてから）
+    if (r.centerClipped >= 0.03) autoExposure({ clipped: r.centerClipped, paper: 255 }, now);
     updateMeter(0);
     showDebug(r, null, now);
     setStatus(g ? TILT_MSG : state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
