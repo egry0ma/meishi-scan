@@ -70,6 +70,9 @@
   .row button { flex: 1; }
   .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--text); }
   .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
+  .qr { background: #fff; padding: 12px; border-radius: 8px; width: min(280px, 100%); margin: 8px auto; }
+  .qr img { width: 100%; height: auto; display: block; image-rendering: pixelated; }
+  .hint.warn { color: var(--warn); }
   #preview-img { width: 100%; max-height: 60vh; object-fit: contain; background: #000; border-radius: 8px; }
   .toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%);
     background: #333; color: #fff; padding: 10px 14px; border-radius: 10px; font-size: 14px; max-width: calc(100vw - 32px);
@@ -119,12 +122,26 @@
     <label class="check"><input id="in-debug" type="checkbox"> 判定の詳細を表示する（撮れないときの原因調べ用）</label>
     <div class="row">
       <button type="button" id="btn-ping">接続テスト</button>
+      <button type="button" id="btn-share">ベータ参加用の QR を表示</button>
     </div>
     <div class="row">
       <button value="cancel" type="submit">閉じる</button>
       <button value="save" type="submit" class="primary" id="btn-save">保存</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dlg-share">
+  <h2>ベータ参加用の設定 QR</h2>
+  <p class="hint">スマホのカメラでこの QR を読み取ると、撮影ページが開き、送信先（GAS の URL）とトークンが設定されます。受領者氏名は各自で入力してもらいます。</p>
+  <div class="qr" id="share-qr"></div>
+  <label for="share-link">設定済みリンク（QR と同じ内容）</label>
+  <input id="share-link" type="text" readonly>
+  <p class="hint warn">この QR とリンクは合言葉そのものです。持っている人は誰でも名簿に書き込めます。渡す相手を限り、グループチャットなどに貼りっぱなしにしないでください。漏れたときは GAS で rotateToken() を実行してトークンを作り直します（全員が設定し直しになります）。</p>
+  <div class="row">
+    <button type="button" id="btn-copy-link">リンクをコピー</button>
+    <button type="button" id="btn-close-share">閉じる</button>
+  </div>
 </dialog>
 
 <dialog id="dlg-preview">
@@ -146,6 +163,11 @@
 // ===== 定数 =====
 const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
 const OPENCV_SRI = 'sha384-XsTfGA62I8LzqS3D7IcgiSOCrJuECWLcg4s1M0AnrkDCcJ8lXX+j+qdg+o6t7KZa';
+// 設定 QR を作るライブラリ（qrcode-generator）。QR を表示するときだけ読み込む
+const QR_URL = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
+const QR_SRI = 'sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1';
+// 個人: /macros/s/…/exec、Workspace: /a/macros/<ドメイン>/s/…/exec
+const GAS_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/;
 const PROC_MAX = 640;        // 検出用に縮小する長辺(px)
 const DETECT_INTERVAL = 100; // 検出の間隔(ms)
 const MIN_AREA = 0.03;       // 検出する四角形の最小面積比（向きに依らず拾えるよう小さめ）
@@ -161,6 +183,8 @@ const GLARE_TILT = 0.04;       // 1枚目のあと、角がこの量（名刺の
 const GLARE_OVERLAP_MAX = 0.3; // 1枚目の反射位置のうち、2枚目でも反射している割合がこれ以下なら2枚目を撮る
 const GLARE_WAIT_MS = 10000;   // 2枚目をこの時間待っても撮れなければ、1枚目だけで保存する
 const GLARE_LOST_MS = 1500;    // 1枚目のあと名刺がこの時間見えなければ、1枚目だけで保存する
+// 露出の自動調整。てかりには効かず、暗くなりすぎる危険もあったため、ベータ版では止めている
+const AUTO_EXPOSURE = false;
 const EXPOSURE_FLOOR = -1.5;   // 露出補正をこれより下げない（暗くなりすぎて名刺が見つからなくなるのを防ぐ）
 const FUSE_LEVEL = 240;        // 合成時に「反射」として置き換える明るさ
 const SHEEN_MIN = 0.05;        // てかり（地の色が明るく薄くなった部分）がこの割合以上なら「反射あり」
@@ -362,7 +386,7 @@ async function startCamera() {
     // 露出補正に対応していれば、反射したときに自動で暗くできるようにする
     const ec = caps.exposureCompensation;
     const ex = state.exposure;
-    ex.supported = !!(ec && typeof ec.min === 'number' && typeof ec.max === 'number' && ec.min < 0);
+    ex.supported = AUTO_EXPOSURE && !!(ec && typeof ec.min === 'number' && typeof ec.max === 'number' && ec.min < 0);
     if (ex.supported) {
       ex.min = ec.min; ex.max = ec.max; ex.unit = ec.step || 0;
       ex.step = Math.max(ec.step || 0, (ec.max - ec.min) / 12);
@@ -768,7 +792,7 @@ function showDebug(r, m, now) {
     if (!state.armed) lines.push('撮影済み: 名刺を画面から外すと次を撮れます');
   }
   const ex = state.exposure;
-  lines.push(`露出補正: ${ex.supported ? '対応（' + ex.value.toFixed(2) + '）' : '非対応'}`);
+  lines.push(`露出補正: ${!AUTO_EXPOSURE ? '自動調整はオフ' : ex.supported ? '対応（' + ex.value.toFixed(2) + '）' : '非対応'}`);
   el.textContent = lines.join('\n');
   el.hidden = false;
 }
@@ -1101,8 +1125,7 @@ async function postToGas(payload) {
 }
 
 function checkSettings({ needReceiver = true } = {}) {
-  // 個人: /macros/s/…/exec、Workspace: /a/macros/<ドメイン>/s/…/exec
-  if (!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/.test(settings.gasUrl)) {
+  if (!GAS_URL_RE.test(settings.gasUrl)) {
     toast('設定で GAS の URL（/exec で終わるもの）を入力してください', 5000);
     openSettings();
     return false;
@@ -1261,6 +1284,96 @@ $('#btn-send').addEventListener('click', sendAll);
 window.addEventListener('beforeunload', (e) => {
   if (state.sending) { e.preventDefault(); e.returnValue = ''; }
 });
+
+// ===== 設定済みリンクと QR（ベータ参加用） =====
+// リンクの形：<このページ>#setup=<{u: GAS の URL, t: トークン} の JSON を base64url にしたもの>
+// # 以降はサーバー（GitHub）に送られない。読み取ったらすぐアドレスバーから消す
+const b64url = (str) => btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64url = (s) => atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+
+function setupLink(gasUrl, token) {
+  return location.origin + location.pathname + '#setup=' + b64url(JSON.stringify({ u: gasUrl, t: token }));
+}
+
+/** ページを設定済みリンクで開いたとき：送信先とトークンを保存する */
+function applySetupLink() {
+  const m = location.hash.match(/^#setup=([A-Za-z0-9_-]+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search); // アドレスバーと履歴から消す
+  let data = null;
+  try { data = JSON.parse(unb64url(m[1])); } catch { /* 下で扱う */ }
+  if (!data || !GAS_URL_RE.test(data.u) || typeof data.t !== 'string' || !/^[0-9a-f]{32,128}$/i.test(data.t)) {
+    toast('設定リンクを読み取れませんでした。リンクが途中で切れていないか確認してください', 6000);
+    return;
+  }
+  if (settings.gasUrl === data.u && settings.token === data.t) {
+    toast('この送信先はすでに設定されています');
+  } else {
+    if (settings.gasUrl && !confirm('今の送信先の設定を、このリンクの設定で置き換えますか？')) return;
+    saveSettings({ ...settings, gasUrl: data.u, token: data.t });
+    toast('送信先を設定しました', 4000);
+  }
+  if (!settings.receiver) {
+    // 受領者氏名だけは各自で入れてもらう
+    openSettings();
+    setTimeout(() => $('#in-receiver').focus(), 50);
+    toast('受領者氏名（ご自身の名前）を入力して「保存」を押してください', 6000);
+  }
+}
+
+let qrLoading = null;
+function loadQr() {
+  if (window.qrcode) return Promise.resolve(window.qrcode);
+  if (!qrLoading) {
+    qrLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = QR_URL;
+      s.integrity = QR_SRI;
+      s.crossOrigin = 'anonymous';
+      s.onload = () => (window.qrcode ? resolve(window.qrcode) : reject(new Error('QR の部品を読み込めませんでした')));
+      s.onerror = () => { qrLoading = null; reject(new Error('QR の部品を読み込めませんでした')); };
+      document.head.append(s);
+    });
+  }
+  return qrLoading;
+}
+
+$('#btn-share').addEventListener('click', async () => {
+  // 保存済みの設定で作る（入力中で未保存の値は使わない）
+  if (!GAS_URL_RE.test(settings.gasUrl) || !settings.token) {
+    toast('先に GAS の URL とトークンを入力して「保存」してください', 5000);
+    return;
+  }
+  const link = setupLink(settings.gasUrl, settings.token);
+  try {
+    const qrcode = await loadQr();
+    const qr = qrcode(0, 'M');
+    qr.addData(link);
+    qr.make();
+    const img = new Image();
+    img.alt = '設定 QR';
+    img.src = qr.createDataURL(8, 16);
+    $('#share-qr').replaceChildren(img);
+  } catch (e) {
+    $('#share-qr').replaceChildren();
+    toast(e.message + '。リンクのコピーは使えます', 5000);
+  }
+  $('#share-link').value = link;
+  $('#dlg-share').showModal();
+});
+$('#btn-copy-link').addEventListener('click', async () => {
+  const link = $('#share-link').value;
+  try { await navigator.clipboard.writeText(link); toast('リンクをコピーしました'); }
+  catch { $('#share-link').select(); toast('リンクを選択しました。コピーしてください'); }
+});
+$('#btn-close-share').addEventListener('click', () => $('#dlg-share').close());
+$('#dlg-share').addEventListener('close', () => {
+  // 合言葉を画面に残さない
+  $('#share-qr').replaceChildren();
+  $('#share-link').value = '';
+});
+window.addEventListener('hashchange', applySetupLink);
+applySetupLink();
 
 // ===== 起動 =====
 (async () => {
