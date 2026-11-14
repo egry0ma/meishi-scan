@@ -133,16 +133,35 @@
     width: 100%; font: inherit; font-size: 16px; /* 16px 未満だと iOS がズームする */
     color: var(--text); background: #fff; border: 1.5px solid var(--line); border-radius: 6px; padding: 10px; }
   input:focus { outline: none; border-color: var(--accent); }
-  input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; }
   .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
   .row button { flex: 1; }
-  .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--text); }
   .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
   .who { font-size: 13px; padding: 8px 10px; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .who.out { border-color: var(--err); color: var(--err); }
   #login-button { min-height: 44px; margin-top: 4px; }
-  details.admin { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
-  details.admin summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  /* 設定画面 */
+  #dlg-settings { max-height: calc(100dvh - 32px); overflow-y: auto; }
+  #dlg-settings h2 { font-size: 18px; margin-bottom: 4px; }
+  .sec { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .06em; margin: 18px 0 6px; }
+  .card { background: var(--sub); border-radius: 10px; padding: 12px 14px; }
+  .card > label:first-child { margin-top: 0; }
+  .acct { margin: 0 0 10px; font-size: 14px; line-height: 1.6; word-break: break-all; white-space: pre-line; }
+  #btn-logout { width: 100%; }
+  .toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; color: var(--text);
+    cursor: pointer; }
+  .toggle + .toggle, .toggle + label { margin-top: 14px; }
+  .toggle b { display: block; font-size: 15px; font-weight: 600; }
+  .toggle small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+  /* チェックボックスを iOS 風のスイッチにする */
+  .toggle input { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 48px; height: 28px;
+    margin: 0; border-radius: 14px; background: #c9ced4; cursor: pointer; transition: background .2s; }
+  .toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .2s; }
+  .toggle input:checked { background: var(--accent); }
+  .toggle input:checked::after { transform: translateX(20px); }
+  details.more { margin-top: 18px; }
+  details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; }
+  details.more[open] summary { margin-bottom: 6px; }
   .gate { position: fixed; inset: 0; z-index: 5; background: var(--bg); display: grid; place-items: center;
     padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
   .gate-box { width: min(420px, 100%); text-align: center; }
@@ -222,18 +241,39 @@
 <dialog id="dlg-settings">
   <form method="dialog" id="form-settings">
     <h2>設定</h2>
-    <label>Google アカウント</label>
-    <p class="hint" id="login-status"></p>
-    <div id="login-button"></div>
-    <button type="button" id="btn-logout" hidden>ログアウト</button>
-    <p class="hint">組織の Google アカウントでログインすると送信できます。ログインした名前が「連絡先受領者氏名」に入ります。</p>
-    <label for="in-sharp">ピントの下限（通常は変更不要）</label>
-    <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
-    <p class="hint">静止中にいちばんピントが合った状態に近づいたら撮影します。これより低い値のときは、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
-    <label class="check"><input id="in-auto" type="checkbox"> 自動撮影する</label>
-    <label class="check"><input id="in-debug" type="checkbox"> 判定の詳細を表示する（撮れないときの原因調べ用）</label>
-    <details class="admin" id="admin">
+
+    <h3 class="sec">アカウント</h3>
+    <div class="card">
+      <p class="acct" id="login-status"></p>
+      <div id="login-button"></div>
+      <button type="button" id="btn-logout" hidden>ログアウト</button>
+      <p class="hint">ログインした名前が「連絡先受領者氏名」に入ります。</p>
+    </div>
+
+    <h3 class="sec">撮影</h3>
+    <div class="card">
+      <label class="toggle">
+        <span><b>自動撮影</b><small>名刺が静止してピントが合ったら自動で撮ります</small></span>
+        <input id="in-auto" type="checkbox" role="switch">
+      </label>
+    </div>
+
+    <details class="more">
+      <summary>うまく撮れないとき</summary>
+      <div class="card">
+        <label class="toggle">
+          <span><b>判定の詳細を表示</b><small>撮れない原因を調べるときに使います</small></span>
+          <input id="in-debug" type="checkbox" role="switch">
+        </label>
+        <label for="in-sharp">ピントの下限（通常は変更不要）</label>
+        <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
+        <p class="hint">これより低いと、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
+      </div>
+    </details>
+
+    <details class="more admin" id="admin">
       <summary>管理者向け（送信先の設定・参加用 QR）</summary>
+      <div class="card">
       <label for="in-url">GAS ウェブアプリの URL（/exec で終わるもの）</label>
       <input id="in-url" type="url" inputmode="url" autocomplete="off" spellcheck="false"
         placeholder="https://script.google.com/macros/s/…/exec">
@@ -244,6 +284,7 @@
       <div class="row">
         <button type="button" id="btn-ping">接続テスト</button>
         <button type="button" id="btn-share">参加用の QR を表示</button>
+      </div>
       </div>
     </details>
     <div class="row">
@@ -319,7 +360,7 @@ const SHEEN_REF_MIN_S = 60;    // 地の色の濃さ（0〜255）がこれ未満
 // 静止とみなす角の移動量（名刺の対角線比）。画面ではなく名刺の大きさを基準にするので、
 // 近づいて手ぶれが画面上で大きく見えても、判定の厳しさが変わらない
 const STABLE_TOL = 0.04;     // 角がこの量（名刺の対角線比）以上動いたら「動いた」とみなし、静止の計測をやり直す。手持ちのぶれで何度もやり直さないよう、ゆるめにする
-const STABLE_MS = 600;       // この時間静止したら撮影候補
+const STABLE_MS = 400;       // この時間静止したら撮影候補
 const REARM_MS = 400;        // 名刺が見えなくなってからこの時間で次の撮影を許可
 const OUT_MAX = 1600;        // 保存画像の長辺(px)
 const JPEG_QUALITY = 0.88;
@@ -1664,7 +1705,7 @@ function renderLogin() {
   who.title = a ? a.email : 'Google アカウントでログイン';
   const configured = CLIENT_ID_RE.test(settings.clientId);
   $('#login-status').textContent = a
-    ? `${a.name}（${a.email}）でログイン中`
+    ? `${a.name} でログイン中\n${a.email}`
     : configured ? 'ログインしていません' : '送信先が未設定です。管理者から参加用の QR をもらって読み取ってください';
   $('#btn-logout').hidden = !a;
   $('#admin').hidden = !showAdmin();
