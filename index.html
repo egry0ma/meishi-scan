@@ -53,11 +53,23 @@
     background: rgba(255,255,255,.92); color: var(--text); box-shadow: 0 2px 10px rgba(0,0,0,.15);
     padding: 6px 14px; border-radius: 999px; font-size: 14px; white-space: nowrap; max-width: calc(100% - 24px);
     overflow: hidden; text-overflow: ellipsis; }
-  .meter { position: absolute; z-index: 1; left: 50%; width: min(220px, calc(100% - 48px)); transform: translateX(-50%);
-    bottom: 14px; height: 5px; background: rgba(255,255,255,.6); border-radius: 3px; overflow: hidden;
-    box-shadow: 0 1px 4px rgba(0,0,0,.2); }
-  .meter > div { height: 100%; width: 0; background: #ffd300; transition: width .1s; }
-  .meter.ok > div { background: var(--ok); }
+  /* 撮影までのゲージ：大きさ → 静止 → ピント の3つがそろうと撮影する */
+  .gauge { position: absolute; z-index: 1; left: 50%; bottom: 12px; transform: translateX(-50%);
+    width: min(340px, calc(100% - 24px)); display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    background: rgba(255,255,255,.94); border-radius: 10px; padding: 8px 12px 10px; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+    transition: opacity .2s; }
+  .gauge.idle { opacity: .55; }
+  .g-step { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .g-label { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+  .g-label::before { content: ""; flex: none; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #c6c6c6;
+    box-sizing: border-box; }
+  .g-bar { height: 6px; background: #e6e8eb; border-radius: 3px; overflow: hidden; }
+  .g-bar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .12s linear; }
+  .g-step.done .g-label { color: var(--ok); }
+  .g-step.done .g-label::before { border: 0; background: var(--ok) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M3.5 7.2l2.3 2.3 4.7-4.9' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat; }
+  .g-step.done .g-bar > i { background: var(--ok); }
+  .g-step.now .g-label { color: var(--text); }
+  .g-step.now .g-label::before { border-color: var(--accent); }
   .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
   .flash.on { opacity: .8; transition: none; }
   /* 下の操作バー：左にサムネイル、中央にシャッター、右に送信 */
@@ -177,7 +189,11 @@
   </div>
   <div class="status" id="status">OpenCV 読み込み中…</div>
   <div class="debug" id="debug" hidden></div>
-  <div class="meter" id="meter" hidden><div></div></div>
+  <div class="gauge" id="meter" hidden>
+    <div class="g-step"><span class="g-label">大きさ</span><span class="g-bar"><i></i></span></div>
+    <div class="g-step"><span class="g-label">静止</span><span class="g-bar"><i></i></span></div>
+    <div class="g-step"><span class="g-label">ピント</span><span class="g-bar"><i></i></span></div>
+  </div>
   <div class="flash" id="flash"></div>
 </div>
 
@@ -870,12 +886,36 @@ function readiness(r) {
   return sharpEnough(r) ? 'ready' : 'focus';
 }
 
-function updateMeter(sharp) {
-  // 静止中の最高値を基準にしたピントの度合い
-  const ratio = Math.min(1, sharp / Math.max(1, state.peak, settings.minSharp));
-  meter.firstElementChild.style.width = (ratio * 100).toFixed(0) + '%';
-  meter.classList.toggle('ok', sharp > 0 && sharp >= settings.minSharp && sharp >= state.peak * PEAK_RATIO);
-  meter.title = 'ピント: ' + Math.round(sharp);
+/**
+ * 撮影までのゲージ。撮影の条件（大きさ → 静止 → ピント）を順に満たしていく様子を見せる。
+ * r が null（名刺が見つからない）なら空にする。静止していないあいだのピントは手ぶれで当てにならないので、
+ * ピントのゲージは静止してから伸ばす。
+ */
+function updateMeter(r, stableFor = 0) {
+  let steps = [[0, false], [0, false], [0, false]];
+  if (r) {
+    const sizeOk = r.fill >= MIN_FILL;
+    const stillOk = sizeOk && stableFor >= STABLE_MS;
+    // ピントは、静止中の最高値（なければ下限）を基準にした度合い
+    const focus = stillOk ? Math.min(1, r.sharp / Math.max(1, state.peak, settings.minSharp)) : 0;
+    steps = [
+      [Math.min(1, r.fill / MIN_FILL), sizeOk],
+      [sizeOk ? Math.min(1, stableFor / STABLE_MS) : 0, stillOk],
+      [focus, stillOk && sharpEnough(r)],
+    ];
+  }
+  const els = meter.children;
+  let current = steps.findIndex(([, ok]) => !ok);
+  if (!r) current = -1;
+  steps.forEach(([v, ok], i) => {
+    const el = els[i];
+    el.classList.toggle('done', ok);
+    el.classList.toggle('now', i === current);
+    el.querySelector('i').style.width = (ok ? 100 : v * 100).toFixed(0) + '%';
+  });
+  // 撮影直後（次の名刺待ち）や、名刺が見つからないあいだは薄く表示する
+  meter.classList.toggle('idle', !r || !state.armed);
+  meter.title = r ? 'ピント: ' + Math.round(r.sharp) : '';
 }
 
 /**
@@ -964,7 +1004,7 @@ function onDetect(r, now) {
     // 名刺が見つからなくても、画面中央が大きく白飛びしていれば露出を下げる（戻すのは名刺が見えてから）
     // 名刺が見つからないときも、画面中央の白飛びで露出を調整する（白飛びが無ければ 0 に戻していく）
     autoExposure({ clipped: r.centerClipped >= 0.03 ? r.centerClipped : 0, paper: 0 }, now);
-    updateMeter(0);
+    updateMeter(null);
     showDebug(r, null, now);
     setStatus(g ? TILT_MSG : state.armed ? '名刺をかざしてください' : '次の名刺に替えてください');
     return;
@@ -980,8 +1020,8 @@ function onDetect(r, now) {
   if (move > STABLE_TOL) { state.stableSince = now; state.peak = 0; }
   if (g && move > GLARE_TILT) g.moved = true;
   state.peak = Math.max(state.peak, r.sharp);
-  updateMeter(r.sharp);
   const stableFor = now - state.stableSince;
+  updateMeter(r, stableFor);
   showDebug(r, { move, stableFor }, now);
 
   if (!state.armed) { setStatus('撮影済み — 次の名刺に替えてください'); return; }
