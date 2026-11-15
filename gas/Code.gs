@@ -15,8 +15,12 @@
  *   F 電話番号 / G Email / H エビデンス（Drive の画像リンク）
  *
  * 認証：撮影ページで Google アカウントにログインしてもらい、その ID トークン（Google が発行し、
- * 1時間で切れる）をリクエストに含めてもらう。GAS は Google の tokeninfo で、本物か・このアプリ向け
- * （CLIENT_ID 宛て）か・許可したドメインやアドレスのアカウントかを確かめる。合言葉は使わない。
+ * 1時間で切れる）を GAS に送ってもらう。GAS は Google の tokeninfo で、本物か・このアプリ向け
+ * （CLIENT_ID 宛て）か・許可したドメインやアドレスのアカウントかを確かめる。
+ * 確かめられたら、GAS が独自の「通行証」（SESSION_DAYS 日使える、SESSION_SECRET で署名したもの）を発行する。
+ * 撮影ページはそれを端末に保存し、送信のたびに送る。GAS は署名と期限に加えて、許可したドメイン・
+ * アドレスかを毎回確かめ直す（許可から外した人は、通行証が残っていても送れない）。
+ * ID トークンは1時間で切れ、スマホのホーム画面版では取り直しが効きにくいため、通行証で長くもたせる。
  * B列（連絡先受領者氏名）には、ログインしたアカウントの名前が入る。
  *
  * doPost の流れ：
@@ -37,6 +41,10 @@
  *   ALLOWED_DOMAIN       送信を許可する Google Workspace のドメイン（例：origami-vol.or.jp）。
  *                        setup() が、実行した人のアドレスのドメインで作る（gmail.com の場合は作らない）
  *   ALLOWED_EMAILS       任意。ドメインに関係なく許可するアドレス（カンマ区切り）
+ *   SESSION_DAYS         任意（既定：14）。ログインの通行証が使える日数（1〜90）
+ *   SESSION_SECRET       通行証の署名に使う合言葉。無ければ初回のログイン時に自動で作る。
+ *                        削除（または変更）すると、発行済みの通行証はすべて使えなくなり、全員ログインし直しになる
+ *                        （端末をなくしたときなど）
  *   ADMIN_EMAILS         撮影ページで「管理者向け」の欄（送信先の設定・参加用 QR）を見られるアドレス
  *                        （カンマ区切り）。setup() が、実行した人のアドレスで作る
  *   FOLDER_ID / SHEET_ID setup() が作成する
@@ -56,6 +64,7 @@ const MeishiScan = (function () {
   const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
   // 3MB 程度の画像まで受け付ける（base64 で約 4MB）
   const MAX_IMAGE_B64_LENGTH = 4 * 1024 * 1024;
+  const DEFAULT_SESSION_DAYS = 14;
 
   // 書き込み先シートの見出し（この順・この列数であることを確認してから書き込む）
   const HEADERS = ['タイムスタンプ', '連絡先受領者氏名', '会社名', '氏名', '氏名(フリガナ)', '電話番号', 'Email', 'エビデンス'];
@@ -156,8 +165,17 @@ const MeishiScan = (function () {
       const req = parseRequest_(e);
       const props = PropertiesService.getScriptProperties();
 
-      // ログインの確認（Google の ID トークン）
-      const auth = authenticate_(req.idToken, props);
+      // ログイン：Google の ID トークンを確かめて、通行証を発行する
+      if (req.action === 'login') {
+        const g = authenticate_(req.idToken, props);
+        if (!g.ok) return json_({ ok: false, error: g.error });
+        const issued = issueSession_(g.user, props);
+        return json_({ ok: true, session: issued.token, exp: issued.exp,
+          name: g.user.name, email: g.user.email, admin: isAdmin_(g.user.email, props) });
+      }
+
+      // ログインの確認（通行証。古い撮影ページからは Google の ID トークン）
+      const auth = req.session ? verifySession_(req.session, props) : authenticate_(req.idToken, props);
       if (!auth.ok) return json_({ ok: false, error: auth.error });
       const user = auth.user;
 
@@ -247,12 +265,25 @@ const MeishiScan = (function () {
    *  - not_configured：CLIENT_ID か、許可するドメイン・アドレスが未設定
    * 確かめた結果は、トークンの有効期限まで（最大50分）キャッシュする。
    */
+  function allowList_(props) {
+    return {
+      clientId: props.getProperty('CLIENT_ID'),
+      domain: String(props.getProperty('ALLOWED_DOMAIN') || '').trim().toLowerCase(),
+      emails: String(props.getProperty('ALLOWED_EMAILS') || '').toLowerCase()
+        .split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x; }),
+    };
+  }
+
+  /** 許可したドメイン（Workspace の hd）か、許可したアドレスか */
+  function isAllowed_(email, hd, allow) {
+    const domainOk = allow.domain && String(hd || '').toLowerCase() === allow.domain;
+    return !!domainOk || allow.emails.indexOf(String(email).toLowerCase()) >= 0;
+  }
+
   function authenticate_(idToken, props) {
-    const clientId = props.getProperty('CLIENT_ID');
-    const allowedDomain = String(props.getProperty('ALLOWED_DOMAIN') || '').trim().toLowerCase();
-    const allowedEmails = String(props.getProperty('ALLOWED_EMAILS') || '').toLowerCase()
-      .split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x; });
-    if (!clientId || (!allowedDomain && !allowedEmails.length)) return { ok: false, error: 'not_configured' };
+    const allow = allowList_(props);
+    const clientId = allow.clientId;
+    if (!clientId || (!allow.domain && !allow.emails.length)) return { ok: false, error: 'not_configured' };
     idToken = String(idToken || '');
     if (!idToken || idToken.length > 4096 || !/^[A-Za-z0-9_\-.]+$/.test(idToken)) return { ok: false, error: 'login_required' };
 
@@ -273,10 +304,70 @@ const MeishiScan = (function () {
     if (!(Number(info.exp) > now)) return { ok: false, error: 'login_required' };
     if (String(info.email_verified) !== 'true') return { ok: false, error: 'not_allowed' };
     const email = String(info.email || '').toLowerCase();
-    const domainOk = allowedDomain && String(info.hd || '').toLowerCase() === allowedDomain;
-    if (!domainOk && allowedEmails.indexOf(email) < 0) return { ok: false, error: 'not_allowed' };
+    if (!isAllowed_(email, info.hd, allow)) return { ok: false, error: 'not_allowed' };
     if (!hit) cache.put(key, JSON.stringify(info), Math.max(1, Math.min(3000, Math.floor(Number(info.exp) - now))));
-    return { ok: true, user: { email: email, name: String(info.name || email) } };
+    return { ok: true, user: { email: email, name: String(info.name || email), hd: String(info.hd || '').toLowerCase() } };
+  }
+
+  /* 通行証：'s1.' + 中身（JSON を base64url）+ '.' + 署名（HMAC-SHA256 を base64url） */
+
+  function sessionSecret_(props) {
+    let secret = props.getProperty('SESSION_SECRET');
+    if (secret) return secret;
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      secret = props.getProperty('SESSION_SECRET');
+      if (!secret) {
+        // UUID（v4）2つ分のランダムさ。推測されなければよいので、長さは十分
+        secret = Utilities.base64EncodeWebSafe(Utilities.getUuid() + Utilities.getUuid());
+        props.setProperty('SESSION_SECRET', secret);
+      }
+      return secret;
+    } finally {
+      lock.releaseLock();
+    }
+  }
+
+  function sign_(body, props) {
+    return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(body, sessionSecret_(props)));
+  }
+
+  function issueSession_(user, props) {
+    let days = Number(props.getProperty('SESSION_DAYS')) || DEFAULT_SESSION_DAYS;
+    days = Math.max(1, Math.min(90, days));
+    const exp = Math.floor(Date.now() / 1000) + days * 86400;
+    const body = Utilities.base64EncodeWebSafe(JSON.stringify({ e: user.email, n: user.name, h: user.hd || '', x: exp }),
+      Utilities.Charset.UTF_8);
+    return { token: 's1.' + body + '.' + sign_(body, props), exp: exp };
+  }
+
+  /** 長さが同じ文字列を、途中で打ち切らずに比べる（比べる時間から署名を推測されないように） */
+  function sameString_(a, b) {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  }
+
+  /** 通行証を確かめる。戻り値は authenticate_ と同じ形 */
+  function verifySession_(token, props) {
+    const allow = allowList_(props);
+    if (!allow.clientId || (!allow.domain && !allow.emails.length)) return { ok: false, error: 'not_configured' };
+    token = String(token || '');
+    const m = token.length <= 2048 && token.match(/^s1\.([A-Za-z0-9_\-=]+)\.([A-Za-z0-9_\-=]+)$/);
+    if (!m) return { ok: false, error: 'login_required' };
+    if (!sameString_(sign_(m[1], props), m[2])) return { ok: false, error: 'login_required' };
+    let p;
+    try {
+      p = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(m[1])).getDataAsString('UTF-8'));
+    } catch (err) {
+      return { ok: false, error: 'login_required' };
+    }
+    if (!(Number(p.x) > Date.now() / 1000)) return { ok: false, error: 'login_required' };
+    // 許可の設定は発行後に変わることがあるので、毎回確かめ直す
+    if (!isAllowed_(p.e, p.h, allow)) return { ok: false, error: 'not_allowed' };
+    return { ok: true, user: { email: String(p.e), name: String(p.n || p.e), hd: String(p.h || '') } };
   }
 
   function isAdmin_(email, props) {

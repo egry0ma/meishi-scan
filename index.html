@@ -343,7 +343,7 @@ const GAS_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s
 const CLIENT_ID_RE = /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/;
 // Google アカウントでのログイン（Google Identity Services）。Google が随時更新するため SRI は付けられない
 const GIS_URL = 'https://accounts.google.com/gsi/client';
-const AUTH_KEY = 'meishi-scan.auth.v1';
+const AUTH_KEY = 'meishi-scan.auth.v2';
 const PROC_MAX = 640;        // 検出用に縮小する長辺(px)
 const DETECT_INTERVAL = 100; // 検出の間隔(ms)
 const MIN_AREA = 0.03;       // 検出する四角形の最小面積比（向きに依らず拾えるよう小さめ）
@@ -1421,7 +1421,7 @@ async function sendOne(it) {
     const image = await blobToBase64(rec.data, rec.mime);
     const data = await postToGas({
       action: 'add',
-      idToken: currentAuth()?.credential || '',
+      ...authFields(),
       cardId: rec.id,
       mimeType: rec.mime,
       capturedAt: rec.createdAt,
@@ -1508,7 +1508,7 @@ $('#btn-ping').addEventListener('click', async () => {
   settings = s; // 入力中の値でテスト
   try {
     if (!checkSettings()) return;
-    const data = await postToGas({ action: 'ping', idToken: currentAuth().credential });
+    const data = await postToGas({ action: 'ping', ...authFields() });
     if (data.error === 'login_required') clearAuth();
     toast(data.ok ? `接続できました（受領者氏名は「${data.name}」になります）` : '接続エラー: ' + (ERROR_TEXT[data.error] || data.error), 6000);
   } catch (e) {
@@ -1574,8 +1574,10 @@ window.addEventListener('beforeunload', (e) => {
 
 // ===== Google アカウントでのログイン =====
 // ログインすると Google から ID トークン（本人であることの証明。1時間で切れる）が届く。
-// 送信のたびにそれを GAS に送り、GAS が Google に問い合わせて本物か・許可したアカウントかを確かめる。
-// ID トークンはこのタブの sessionStorage にだけ置く（タブを閉じれば消える）。
+// それを GAS に送って確かめてもらい、GAS が発行する「通行証」（既定で14日使える）を受け取る。
+// 通行証は localStorage に置き、送信のたびに GAS に送る（GAS が署名・期限・許可を毎回確かめる）。
+// ホーム画面から開いたアプリは閉じるたびに sessionStorage が消え、ID トークンの取り直しも効きにくいため。
+// GAS が古く通行証を発行しないときは、これまでどおり ID トークン（1時間）で送る。
 function decodeJwt(jwt) {
   const part = jwt.split('.')[1] || '';
   const bin = unb64url(part);
@@ -1584,13 +1586,21 @@ function decodeJwt(jwt) {
 }
 function currentAuth() {
   let a = null;
-  try { a = JSON.parse(sessionStorage.getItem(AUTH_KEY) || 'null'); } catch { /* なし扱い */ }
+  try { a = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null'); } catch { /* なし扱い */ }
   // 期限の1分前からは切れたものとして扱う
-  if (!a || !a.credential || !(a.exp * 1000 - 60000 > Date.now())) return null;
+  if (!a || !a.token || !(a.exp * 1000 - 60000 > Date.now())) return null;
   return a;
 }
+/** GAS へのリクエストに付ける、ログインの証明 */
+function authFields(a = currentAuth()) {
+  if (!a) return { idToken: '' };
+  return a.kind === 'session' ? { session: a.token } : { idToken: a.token };
+}
+function saveAuth(a) {
+  try { localStorage.setItem(AUTH_KEY, JSON.stringify(a)); } catch { /* 保存できなくても、このあいだは使える */ }
+}
 function clearAuth() {
-  try { sessionStorage.removeItem(AUTH_KEY); } catch { /* noop */ }
+  try { localStorage.removeItem(AUTH_KEY); } catch { /* noop */ }
   role = { checked: false, admin: false };
   renderLogin();
 }
@@ -1601,7 +1611,7 @@ async function checkRole() {
   const a = currentAuth();
   if (!a || !GAS_URL_RE.test(settings.gasUrl)) return;
   try {
-    const data = await postToGas({ action: 'ping', idToken: a.credential });
+    const data = await postToGas({ action: 'ping', ...authFields(a) });
     if (data.ok) role = { checked: true, admin: data.admin === true };
     else if (data.error === 'login_required') clearAuth();
   } catch { /* 問い合わせられないときは欄を出さない（直すときは #admin で開く） */ }
@@ -1621,17 +1631,37 @@ function showAdmin() {
   const configured = GAS_URL_RE.test(settings.gasUrl) && CLIENT_ID_RE.test(settings.clientId);
   return !configured || role.admin || forceAdmin;
 }
-function onCredential(resp) {
+async function onCredential(resp) {
+  let a;
   try {
     const p = decodeJwt(resp.credential);
-    const a = { credential: resp.credential, name: p.name || p.email, email: p.email, exp: p.exp };
-    sessionStorage.setItem(AUTH_KEY, JSON.stringify(a));
-    toast(`${a.name} でログインしました`);
-    checkRole();
+    a = { kind: 'id', token: resp.credential, name: p.name || p.email, email: p.email, exp: p.exp };
   } catch (e) {
     console.error(e);
     toast('ログインできませんでした: ' + e.message, 5000);
+    return;
   }
+  // GAS に確かめてもらい、長く使える通行証に替える
+  let exchanged = false;
+  if (GAS_URL_RE.test(settings.gasUrl)) {
+    try {
+      const data = await postToGas({ action: 'login', idToken: a.token });
+      if (data.ok && data.session) {
+        a = { kind: 'session', token: data.session, name: data.name || a.name, email: data.email || a.email, exp: data.exp };
+        role = { checked: true, admin: data.admin === true };
+        exchanged = true;
+      } else if (data.error === 'not_allowed' || data.error === 'not_configured') {
+        toast(ERROR_TEXT[data.error] || data.error, 6000);
+        return;
+      }
+      // それ以外（GAS が古く login を知らない など）は、ID トークンのまま使う
+    } catch (e) {
+      console.warn('通行証を受け取れませんでした（ID トークンのまま使います）', e);
+    }
+  }
+  saveAuth(a);
+  toast(`${a.name} でログインしました`);
+  if (!exchanged) checkRole();
   renderLogin();
 }
 
