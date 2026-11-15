@@ -4,22 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#F7F3EA">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>名刺スキャン</title>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="名刺ノ介">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<title>名刺ノ介</title>
 <style>
-  /* 白地に、青（主な操作）・緑（成功・撮影できる）・赤（失敗・反射）の3色 */
+  /* 名刺ノ介：生成りの地に、紺（主な操作）・緑（成功・撮影できる）・朱（失敗・反射）。朱はブランドの差し色も兼ねる */
   :root {
-    --bg: #fff;
+    --bg: #F7F3EA;
     --panel: #fff;
-    --sub: #f4f6f8;
-    --text: #262830;
-    --muted: #707070;
-    --accent: #146cb3;
+    --sub: #EFE9DC;
+    --text: #1A1A1A;
+    --muted: #6E6A62;
+    --accent: #1E3557;
     --ok: #1d9662;
-    --warn: #b7791f;
-    --err: #ff254f;
-    --line: #dcdfe3;
+    --warn: #9a6a14;
+    --err: #C9412E;
+    --line: #E2DACA;
     --safe-t: env(safe-area-inset-top, 0px);
     --safe-b: env(safe-area-inset-bottom, 0px);
   }
@@ -30,10 +36,9 @@
   body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
   header { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line);
     padding: calc(var(--safe-t) + 8px) max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left)); }
-  header h1 { font-size: 16px; margin: 0; flex: 1; letter-spacing: .04em; }
-  header h1::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 8px;
-    background: var(--accent); transform: rotate(45deg); vertical-align: 1px; }
-  button { font: inherit; color: var(--text); background: #fff; border: 1.5px solid var(--line);
+  header h1 { margin: 0; flex: 1; min-width: 0; line-height: 0; }
+  header h1 img { height: 36px; width: auto; display: block; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1.5px solid var(--line);
     border-radius: 6px; padding: 10px 14px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
   button:disabled { opacity: .45; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -43,7 +48,7 @@
   .stage .placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 20px; color: var(--muted); text-align: center; padding: 24px;
     font-size: 14px; line-height: 1.7; }
-  .placeholder svg { width: 56px; height: 56px; color: #b8bec6; }
+  .placeholder .ph-icon { width: 64px; height: 64px; opacity: .9; }
   .placeholder p { margin: 0; max-width: 320px; }
   #btn-camera { font-size: 16px; font-weight: 600; padding: 14px 28px; border-radius: 999px; min-width: 200px; }
   .debug { position: absolute; z-index: 1; left: 8px; right: 8px; top: 52px; background: rgba(0,0,0,.75); color: #f2f2f2;
@@ -73,11 +78,11 @@
   .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
   .flash.on { opacity: .8; transition: none; }
   /* 下の操作バー：左にサムネイル、中央にシャッター、右に送信 */
-  .controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; background: #fff;
+  .controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; background: var(--bg);
     border-top: 1px solid var(--line); padding: 14px 24px calc(var(--safe-b) + 14px); }
   .controls > :first-child { justify-self: start; }
   .controls > :last-child { justify-self: end; }
-  .shutter { width: 72px; height: 72px; border-radius: 50%; padding: 0; background: #fff;
+  .shutter { width: 72px; height: 72px; border-radius: 50%; padding: 0; background: var(--panel);
     border: 4px solid var(--accent); display: grid; place-items: center; }
   .shutter::after { content: ""; width: 54px; height: 54px; border-radius: 50%; background: var(--accent); transition: transform .1s; }
   .shutter:active:not(:disabled)::after { transform: scale(.86); }
@@ -92,14 +97,14 @@
   @keyframes bump { 40% { transform: scale(1.15); } }
   .count { position: absolute; top: -8px; right: -8px; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px;
     background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; line-height: 22px; text-align: center;
-    box-shadow: 0 0 0 2px #fff; }
+    box-shadow: 0 0 0 2px var(--bg); }
   .count.err { background: var(--err); }
   .count:empty { display: none; }
   .send-btn { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
     min-width: 64px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-weight: 600;
     background: var(--accent); border-color: var(--accent); color: #fff; }
   .send-btn svg { width: 24px; height: 24px; }
-  .send-btn:disabled { background: #fff; border-color: var(--line); color: var(--muted); opacity: 1; }
+  .send-btn:disabled { background: var(--panel); border-color: var(--line); color: var(--muted); opacity: 1; }
   .send-btn.busy svg { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .fly { position: fixed; z-index: 3; pointer-events: none; border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.25);
@@ -117,7 +122,7 @@
     border: 1.5px solid var(--line); padding: 0; background: var(--sub); }
   .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .thumb .badge { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; padding: 3px 6px; color: #fff;
-    background: rgba(38,40,48,.7); text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    background: rgba(26,26,26,.68); text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .thumb.sending { border-color: var(--accent); }
   .thumb.sending .badge::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px;
     border: 2px solid #fff; border-right-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;
@@ -126,12 +131,12 @@
   .thumb.error .badge { background: var(--err); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
     width: min(520px, calc(100vw - 32px)); padding: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.18); }
-  dialog::backdrop { background: rgba(38,40,48,.4); }
+  dialog::backdrop { background: rgba(26,26,26,.4); }
   dialog h2 { font-size: 16px; margin: 0 0 12px; }
   label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
   input[type=url], input[type=password], input[type=text], input[type=number] {
     width: 100%; font: inherit; font-size: 16px; /* 16px 未満だと iOS がズームする */
-    color: var(--text); background: #fff; border: 1.5px solid var(--line); border-radius: 6px; padding: 10px; }
+    color: var(--text); background: var(--panel); border: 1.5px solid var(--line); border-radius: 6px; padding: 10px; }
   input:focus { outline: none; border-color: var(--accent); }
   .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
   .row button { flex: 1; }
@@ -143,7 +148,7 @@
   #dlg-settings { max-height: calc(100dvh - 32px); overflow-y: auto; }
   #dlg-settings h2 { font-size: 18px; margin-bottom: 4px; }
   .sec { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .06em; margin: 18px 0 6px; }
-  .card { background: var(--sub); border-radius: 10px; padding: 12px 14px; }
+  .card { background: var(--bg); border-radius: 10px; padding: 12px 14px; }
   .card > label:first-child { margin-top: 0; }
   .acct { margin: 0 0 10px; font-size: 14px; line-height: 1.6; word-break: break-all; white-space: pre-line; }
   #btn-logout { width: 100%; }
@@ -154,20 +159,21 @@
   .toggle small { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
   /* チェックボックスを iOS 風のスイッチにする */
   .toggle input { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 48px; height: 28px;
-    margin: 0; border-radius: 14px; background: #c9ced4; cursor: pointer; transition: background .2s; }
+    margin: 0; border-radius: 14px; background: #cfc8b9; cursor: pointer; transition: background .2s; }
   .toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
     background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .2s; }
   .toggle input:checked { background: var(--accent); }
   .toggle input:checked::after { transform: translateX(20px); }
   details.more { margin-top: 18px; }
+  .reload { width: 100%; margin-top: 16px; }
   details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; }
   details.more[open] summary { margin-bottom: 6px; }
   .gate { position: fixed; inset: 0; z-index: 5; background: var(--bg); display: grid; place-items: center;
     padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
   .gate-box { width: min(420px, 100%); text-align: center; }
-  .gate-box h2 { font-size: 20px; margin: 0 0 12px; letter-spacing: .04em; }
-  .gate-box h2::before { content: ""; display: block; width: 18px; height: 18px; margin: 0 auto 18px;
-    background: var(--accent); transform: rotate(45deg); }
+  .gate-box h2 { margin: 0 0 14px; line-height: 0; }
+  .gate-box h2 img { width: min(300px, 80%); height: auto; }
+  .gate-box .tagline { color: var(--accent); font-size: 15px; font-weight: 700; letter-spacing: .12em; margin: 0 0 28px; }
   .gate-box p { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 0 0 20px; }
   #gate-login { display: flex; justify-content: center; min-height: 44px; }
   #gate-admin { margin-top: 24px; }
@@ -184,7 +190,8 @@
 <body class="off">
 <div class="gate" id="gate" hidden>
   <div class="gate-box">
-    <h2>名刺スキャン</h2>
+    <h2><img src="assets/logo.svg" alt="名刺ノ介"></h2>
+    <p class="tagline">撮るだけで、みんなの名刺帳に。</p>
     <p id="gate-msg"></p>
     <div id="gate-login"></div>
     <button type="button" id="gate-admin" hidden>管理者向けの設定を開く</button>
@@ -192,7 +199,7 @@
 </div>
 
 <header>
-  <h1>名刺スキャン</h1>
+  <h1><img src="assets/logo.svg" alt="名刺ノ介"></h1>
   <button id="btn-stop" type="button" hidden>停止</button>
   <button id="btn-who" type="button" class="who">ログイン</button>
   <button id="btn-settings" type="button">設定</button>
@@ -202,7 +209,7 @@
   <video id="video" autoplay muted playsinline></video>
   <canvas id="overlay" class="overlay"></canvas>
   <div class="placeholder" id="placeholder">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5.5" width="19" height="13" rx="2"/><circle cx="8.5" cy="11" r="2"/><path d="M5.5 15.5c.6-1.4 1.7-2 3-2s2.4.6 3 2M14 10h4.5M14 13h3"/></svg>
+    <img class="ph-icon" src="assets/icon.svg" alt="">
     <p>名刺をカメラにかざすと、四角形を見つけて、静止してピントが合ったときに自動で撮影します。</p>
     <button id="btn-camera" type="button" class="primary">カメラを開始</button>
   </div>
@@ -268,6 +275,8 @@
         <label for="in-sharp">ピントの下限（通常は変更不要）</label>
         <input id="in-sharp" type="number" min="1" max="2000" step="1" inputmode="numeric">
         <p class="hint">これより低いと、ぼけているとみなして撮影しません。ぼけた写真が撮れるときは上げてください。</p>
+        <button type="button" id="btn-reload" class="reload">ページを読み込み直す</button>
+        <p class="hint">ホーム画面から開いたときなど、画面がおかしいときに使います。撮った名刺は消えません。</p>
       </div>
     </details>
 
@@ -919,7 +928,7 @@ function openMask(m, w, h) {
   return out;
 }
 const sharpEnough = (r) => r.sharp >= settings.minSharp && r.sharp >= state.peak * PEAK_RATIO;
-const QUAD_COLORS = { wait: '#c6c6c6', glare: '#ff254f', focus: '#ffd300', ready: '#1d9662' };
+const QUAD_COLORS = { wait: '#c6c6c6', glare: '#C9412E', focus: '#ffd300', ready: '#1d9662' };
 /** 枠の色を決める状態（撮影の可否の判定は onDetect で行う） */
 function readiness(r) {
   if (!state.armed || r.fill < MIN_FILL) return 'wait';
@@ -1717,6 +1726,7 @@ function renderLogin() {
   }
 }
 $('#btn-who').addEventListener('click', openSettings);
+$('#btn-reload').addEventListener('click', () => location.reload());
 $('#gate-admin').addEventListener('click', () => { openSettings(); $('#admin').open = true; });
 $('#btn-logout').addEventListener('click', () => {
   try { window.google?.accounts?.id?.disableAutoSelect(); } catch { /* noop */ }
@@ -1742,11 +1752,15 @@ function setupLink(gasUrl, clientId) {
   return location.origin + location.pathname + '#setup=' + b64url(JSON.stringify({ u: gasUrl, c: clientId }));
 }
 
-/** ページを設定済みリンクで開いたとき：送信先を保存し、ログインしてもらう */
+/**
+ * ページを設定済みリンクで開いたとき：送信先を保存し、ログインしてもらう。
+ * リンクの #setup=… はアドレスに残す。iPhone の「ホーム画面に追加」はこのアドレスを覚え、
+ * ホーム画面から開いたアプリは Safari と保存場所が別なので、リンクから設定し直す必要があるため。
+ * （中身は送信先の URL とクライアント ID だけで、秘密の情報は入っていない）
+ */
 function applySetupLink() {
   const m = location.hash.match(/^#setup=([A-Za-z0-9_-]+)$/);
   if (!m) return;
-  history.replaceState(null, '', location.pathname + location.search); // アドレスバーと履歴から消す
   let data = null;
   try { data = JSON.parse(unb64url(m[1])); } catch { /* 下で扱う */ }
   if (!data || !GAS_URL_RE.test(data.u) || !CLIENT_ID_RE.test(data.c)) {
@@ -1754,7 +1768,7 @@ function applySetupLink() {
     return;
   }
   if (settings.gasUrl === data.u && settings.clientId === data.c) {
-    toast('この送信先はすでに設定されています');
+    // 設定済み（ホーム画面から開くたびにここを通る）なので何も言わない
   } else {
     if (settings.gasUrl && !confirm('今の送信先の設定を、このリンクの設定で置き換えますか？')) return;
     if (settings.clientId !== data.c) clearAuth(); // 別のアプリ向けのログインは使えない
