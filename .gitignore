@@ -16,6 +16,8 @@
 *.xls
 *.json
 !package.json
+# アプリのアイコン（名刺画像ではない）は例外
+!assets/*.png
 samples/
 test-images/
 data/
